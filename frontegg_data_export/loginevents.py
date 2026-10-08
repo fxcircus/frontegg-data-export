@@ -55,13 +55,15 @@ UNAVAILABLE_REASONS = {
 }
 
 
-def date_range(now: datetime, last_success_started: datetime | None, since: datetime | None,
+def date_range(now: datetime, previous_end: datetime | None, since: datetime | None,
                max_days: int) -> tuple[datetime, datetime, bool]:
-    """(from, to, capped). Default: since the previous succeeded run; never
-    further back than `max_days`. An explicit `since` is capped the same way."""
+    """(from, to, capped). Default: from where the last complete read of login
+    events ended (`previous_end`), so runs that skipped login events leave no
+    gap; never further back than `max_days`. An explicit `since` is capped
+    the same way."""
     max_days = max(1, int(max_days))
     floor = now - timedelta(days=max_days)
-    start = since or last_success_started or floor
+    start = since or previous_end or floor
     capped = start < floor
     return (max(start, floor), now, capped)
 

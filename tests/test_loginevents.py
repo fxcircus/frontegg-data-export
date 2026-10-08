@@ -89,6 +89,27 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(sent, {first.summary()["startedAt"].replace("+00:00", "Z")})
             self.assertFalse(second.snapshot()["sections"]["login_events"]["capped"])
 
+    def test_a_run_without_login_events_leaves_no_gap(self):
+        with MockFrontegg(make_dataset(tenants=4, big_tenant_users=5)) as m, temp_dir() as tmp:
+            first = run_export(m, tmp, preset="users", roles=False, login_events=True)
+            run_export(m, tmp, preset="users", roles=False)                  # no login events this time
+            m.requests.clear()
+            run_export(m, tmp, preset="users", roles=False, login_events=True)
+            sent = {c["query"]["created_from"][0] for c in m.calls_to(AUDITS_PATH)}
+            self.assertEqual(sent, {first.snapshot()["sections"]["login_events"]["to"]})
+
+    def test_a_partial_read_is_read_again(self):
+        ds = make_dataset(tenants=4, big_tenant_users=5)
+        with MockFrontegg(ds) as m, temp_dir() as tmp:
+            first = run_export(m, tmp, preset="users", roles=False, login_events=True)
+            m.faults.audits_mode = "error"
+            self.assertEqual(run_export(m, tmp, preset="users", roles=False, login_events=True).code, 2)
+            m.faults.audits_mode = "ok"
+            m.requests.clear()
+            run_export(m, tmp, preset="users", roles=False, login_events=True)
+            sent = {c["query"]["created_from"][0] for c in m.calls_to(AUDITS_PATH)}
+            self.assertEqual(sent, {first.snapshot()["sections"]["login_events"]["to"]})
+
     def test_unavailable_does_not_fail_the_run(self):
         for mode in ("forbidden", "not_found"):
             with self.subTest(mode=mode):

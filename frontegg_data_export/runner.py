@@ -219,12 +219,16 @@ class Run:
         self.reporter.step_done("entitlements", f"Plan assignments: {len(self.data['entitlements'])}")
         return len(self.data["entitlements"])
 
-    def _last_success_started(self) -> datetime | None:
-        ok = [r for r in self.store.load_history()["runs"] if r.get("status") == SUCCEEDED]
-        return parse_ts(ok[-1].get("startedAt")) if ok else None
+    def _last_login_events_end(self) -> datetime | None:
+        """Where the last complete read of login events stopped. Runs that
+        didn't read login events (or read them only partly) don't count, so
+        they can't leave a gap in the record."""
+        ends = [parse_ts(r.get("loginEventsTo")) for r in self.store.load_history()["runs"]
+                if r.get("loginEventsTo") and r.get("status") != FAILED]
+        return max((e for e in ends if e), default=None)
 
     def _step_login_events(self) -> int:
-        start, end, capped = date_range(self.started_at, self._last_success_started(), self.since,
+        start, end, capped = date_range(self.started_at, self._last_login_events_end(), self.since,
                                         self.login_events_max_days)
         accounts = sorted(users_by_tenant(self.data["users"]))
         window = f"{iso_z(start)} to {iso_z(end)}"
@@ -401,6 +405,8 @@ class Run:
         entry = {k: summary[k] for k in ("runId", "status", "trigger", "startedAt", "endedAt", "durationSeconds",
                                           "preset", "presetLabel", "sections", "apiCalls", "counts",
                                           "usableAsBaseline")}
+        login = self.section_notes.get("login_events") or {}
+        entry["loginEventsTo"] = login.get("to") if (self.status != FAILED and login.get("status") == "ok") else None
         self.store.record_run(entry, make_baseline=summary["usableAsBaseline"])
         deleted, warnings = self.store.apply_retention(self.keep, protect={self.run_id})
         if deleted:

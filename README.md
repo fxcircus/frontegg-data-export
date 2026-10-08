@@ -214,7 +214,7 @@ Rough call counts for a medium environment (5,000 users, 5,000 accounts, 5,000 p
 
 **Calls and date range**
 - The audit API is per account, so this costs about one extra call per account that has users. The estimate includes it.
-- By default it reads everything since the previous succeeded run, but never more than 30 days back (`--login-events-max-days`). `--since 2026-10-01` sets the start explicitly.
+- By default it reads everything since the last run that read login events completely, so runs without login events don't leave a gap. It never reads more than 30 days back (`--login-events-max-days`). `--since 2026-10-01` sets the start explicitly.
 
 **How rows are classified**
 - Frontegg doesn't document the action names it uses for logins, so rows are classified by matching the action text: `login`, `logged in` or `authenticated` mark a login, and `fail`, `invalid`, `denied` or `locked` mark a failure.
