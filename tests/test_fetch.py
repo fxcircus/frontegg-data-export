@@ -7,9 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from frontegg_data_export import client as client_mod
 from frontegg_data_export import fetch, logs
-from frontegg_data_export.client import FronteggClient
+from frontegg_data_export.client import ApiError, FronteggClient
 from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg, make_dataset
 
 
@@ -29,14 +28,13 @@ class FetchTests(unittest.TestCase):
             mock.patch.object(fetch, "THROTTLE_SEC", 0),
             mock.patch.object(logs, "LOG_PATH", Path(self.tmp.name) / "export.log"),
             mock.patch.object(logs, "_log_fp", None),
-            mock.patch.object(client_mod.time, "sleep", lambda s: None),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self._close_log)
         self.mock.requests.clear()
-        self.client = FronteggClient(self.mock.url, CLIENT_ID, CLIENT_SECRET)
+        self.client = FronteggClient(self.mock.url, CLIENT_ID, CLIENT_SECRET, sleep=lambda s: None)
         self.client.authenticate()
 
     def _close_log(self):
@@ -101,18 +99,16 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(len(resp["items"]), 10)
 
     def test_mock_hierarchy_without_header_is_403(self):
-        import urllib.error
-        with self.assertRaises(urllib.error.HTTPError) as cm:
+        with self.assertRaises(ApiError) as cm:
             self.client.get("/tenants/resources/hierarchy/v1/tree")
-        self.assertEqual(cm.exception.code, 403)
+        self.assertEqual(cm.exception.status, 403)
 
     def test_mock_long_url_is_414(self):
-        import urllib.error
         ids = ",".join(u["id"] for u in self.ds.users[:250])
-        with self.assertRaises(urllib.error.HTTPError) as cm:
+        with self.assertRaises(ApiError) as cm:
             self.client.get("/identity/resources/users/v3/roles", {"ids": ids},
                             tenant_id=self.ds.tenants[-1]["tenantId"])
-        self.assertEqual(cm.exception.code, 414)
+        self.assertEqual(cm.exception.status, 414)
 
     def test_role_lookups_batched_per_tenant_in_chunks_of_100(self):
         users = list(self.ds.users)
