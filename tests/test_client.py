@@ -73,6 +73,8 @@ def make_client(test: unittest.TestCase, script: dict, **kw) -> tuple[FronteggCl
     patcher.start()
     test.addCleanup(patcher.stop)
     kw.setdefault("rand", lambda: 1.0)
+    kw.setdefault("rate", 1e9)               # pacing has its own tests; keep it out of these
+    kw.setdefault("ceilings_per_min", {})
     c = FronteggClient("https://api.example.com", "id", "secret", sleep=sleeps.append, **kw)
     return c, opener, sleeps
 
@@ -212,7 +214,8 @@ class MockServerRetryTests(unittest.TestCase):
     """The same behaviors end to end against the mock's injected faults."""
 
     def _client(self, m: MockFrontegg, sleeps: list) -> FronteggClient:
-        return FronteggClient(m.url, CLIENT_ID, CLIENT_SECRET, sleep=sleeps.append, rand=lambda: 0.0)
+        return FronteggClient(m.url, CLIENT_ID, CLIENT_SECRET, sleep=sleeps.append, rand=lambda: 0.0,
+                              rate=1e9, ceilings_per_min={})
 
     def _all_users(self, c: FronteggClient) -> list:
         out, page = [], 0

@@ -11,6 +11,30 @@ LOG_PATH = APP_DIR / "export.log"
 
 REQUIRED_VARS = ("FRONTEGG_CLIENT_ID", "FRONTEGG_CLIENT_SECRET", "FRONTEGG_BASE_URL")
 
+# Requests per second. Frontegg's general limit is 100/min per IP on the Launch
+# plan and 1,000/min per IP on Scale and Enterprise, shared with any other
+# traffic from the same IP. gentle (90/min) fits under Launch; normal (240/min)
+# is about a quarter of the Scale/Enterprise budget; fast (720/min) leaves
+# little room for anything else on that IP.
+RATE_PRESETS = {"gentle": 1.5, "normal": 4.0, "fast": 12.0}
+DEFAULT_RATE = "normal"
+MIN_RATE, MAX_RATE = 0.5, 16.0
+
+
+def parse_rate(value: str | float | None) -> float:
+    """A preset name or a number of requests per second."""
+    if value is None or value == "":
+        return RATE_PRESETS[DEFAULT_RATE]
+    if isinstance(value, str) and value.strip().lower() in RATE_PRESETS:
+        return RATE_PRESETS[value.strip().lower()]
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Rate must be gentle, normal, fast or a number of requests per second, not {value!r}")
+    if not MIN_RATE <= rate <= MAX_RATE:
+        raise ValueError(f"Rate must be between {MIN_RATE} and {MAX_RATE} requests per second")
+    return rate
+
 
 def load_config(path: Path) -> dict[str, str]:
     """Reads credentials from `.env` next to the app, falling back to

@@ -9,6 +9,9 @@ somewhere else.
 Transient failures (429, any 5xx, timeouts, dropped connections) are retried
 with full-jitter exponential backoff. A `Retry-After` header wins over the
 backoff when present, as seconds or as an HTTP date.
+
+Requests are spaced by a `Throttle`: a global requests-per-second rate plus
+per-endpoint ceilings that sit under Frontegg's documented per-vendor limits.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import email.utils
 import http.client
 import json
 import random
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +38,18 @@ MAX_ATTEMPTS = 6          # first try + 5 retries
 BACKOFF_BASE = 1.0        # seconds; attempt n waits up to base * 2**n ...
 BACKOFF_CAP = 60.0        # ... but never more than this
 RETRY_AFTER_CAP = 300.0   # don't let a server park us for longer than 5 minutes
+RATE_LIMIT_RESET_CAP = 60.0
+
+# Per-endpoint ceilings in requests per MINUTE. Frontegg documents per-vendor
+# limits for some endpoints that are much lower than the general per-IP limit
+# (100/min on Launch, 1,000/min on Scale and Enterprise), and they are shared
+# with every other caller using the same vendor credentials.
+ENDPOINT_CEILINGS_PER_MIN = {
+    # Documented: 60/min per vendor on Launch, 100 on Scale, 200 on Enterprise.
+    "/identity/resources/users/v3": 50,
+    # Documented for /tenants/v1 at 30/min; v2 isn't listed, so assume the same.
+    "/tenants/resources/tenants/v2": 30,
+}
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -110,6 +126,45 @@ def is_retryable_status(status: int) -> bool:
     return status == 429 or 500 <= status <= 599
 
 
+class Throttle:
+    """Spaces requests evenly: at most `rate` per second overall, and at most
+    the per-endpoint ceiling for listed paths. Evenly spaced (no bursts) is
+    kinder to a per-IP budget that production traffic shares."""
+
+    def __init__(self, rate: float, ceilings_per_min: dict[str, float] | None = None, *,
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
+        self.interval = 1.0 / rate
+        self.ceilings = {p: 60.0 / n for p, n in (ceilings_per_min or {}).items()}
+        self.clock = clock
+        self.sleep = sleep
+        self._next_any = 0.0
+        self._next_path: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def wait(self, path: str) -> float:
+        """Block until a request to `path` may go out. Returns seconds waited."""
+        with self._lock:
+            now = self.clock()
+            ready = max(self._next_any, self._next_path.get(path, 0.0))
+            waited = 0.0
+            if ready > now:
+                waited = ready - now
+                self.sleep(waited)
+                now = ready
+            self._next_any = now + self.interval
+            if path in self.ceilings:
+                self._next_path[path] = now + self.ceilings[path]
+            return waited
+
+    def pause(self, seconds: float) -> None:
+        """Hold every request for `seconds` (e.g. the rate-limit window reset)."""
+        with self._lock:
+            self._next_any = max(self._next_any, self.clock() + seconds)
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
         return None   # urllib then raises HTTPError for the 3xx
@@ -146,6 +201,7 @@ def _error_text(raw: bytes) -> str:
 
 class FronteggClient:
     def __init__(self, base_url: str, client_id: str, secret: str, *,
+                 rate: float = 4.0, ceilings_per_min: dict[str, float] | None = None,
                  timeout: float = HTTP_TIMEOUT, max_attempts: int = MAX_ATTEMPTS,
                  backoff_base: float = BACKOFF_BASE, backoff_cap: float = BACKOFF_CAP,
                  sleep: Callable[[float], None] = time.sleep,
@@ -163,6 +219,9 @@ class FronteggClient:
         self.clock = clock
         self.wall_clock = wall_clock
         self.rand = rand
+        self.rate = rate
+        self.throttle = Throttle(rate, ENDPOINT_CEILINGS_PER_MIN if ceilings_per_min is None else ceilings_per_min,
+                                 clock=clock, sleep=sleep)
         self.token: str | None = None
         self.token_expires_at: float = 0.0
         # running stats
@@ -177,6 +236,7 @@ class FronteggClient:
     def _send(self, method: str, path: str, *, params: dict | None = None,
               body: bytes | None = None, headers: dict | None = None):
         check_request_allowed(method, path)
+        self.throttle.wait(path)
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
@@ -277,6 +337,7 @@ class FronteggClient:
             rl_limit = resp_headers.get("x-rate-limit-limit", "") or ""
             if rl_limit:
                 self.rate_limit_headers_seen += 1
+            self._observe_remaining(resp_headers)
             elapsed = self.clock() - t0
             tenant_note = f" tenant={tenant_id}" if tenant_id else ""
             level = "INFO" if 200 <= status < 300 else "WARN"
@@ -310,6 +371,27 @@ class FronteggClient:
             raise ApiError(f"HTTP {status}: {reason}" if reason else f"HTTP {status}",
                            status=status, path=path, trace_id=trace)
         raise AssertionError("unreachable")
+
+
+    def _observe_remaining(self, headers) -> None:
+        """Only some /identity/ routes send x-rate-limit-* headers, and not
+        consistently. When one says the window is used up, wait for the reset
+        instead of walking into a 429."""
+        remaining = headers.get("x-rate-limit-remaining")
+        reset = headers.get("x-rate-limit-reset")
+        if remaining is None or reset is None:
+            return
+        try:
+            if int(float(remaining)) > 0:
+                return
+            reset_s = float(reset)
+        except ValueError:
+            return
+        if reset_s > 1e9:                       # an epoch timestamp, not a delta
+            reset_s -= self.wall_clock()
+        pause = min(max(reset_s, 0.0), RATE_LIMIT_RESET_CAP)
+        _log(f"rate-limit window used up; pausing {pause:.1f}s", "WARN")
+        self.throttle.pause(pause)
 
 
 def _describe_network_error(e: BaseException) -> str:

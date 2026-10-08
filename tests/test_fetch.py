@@ -25,7 +25,6 @@ class FetchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         patches = [
-            mock.patch.object(fetch, "THROTTLE_SEC", 0),
             mock.patch.object(logs, "LOG_PATH", Path(self.tmp.name) / "export.log"),
             mock.patch.object(logs, "_log_fp", None),
         ]

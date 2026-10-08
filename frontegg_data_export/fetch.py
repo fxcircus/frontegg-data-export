@@ -1,4 +1,5 @@
 """Pull helpers — each one encodes a specific Frontegg pagination quirk.
+Request pacing lives in the client's throttle, not here.
 
 Tuning constants reflect live-verified Frontegg API behaviour. Most you should
 NOT need to change. Each comment notes why the value is what it is so you can
@@ -13,7 +14,6 @@ from typing import Iterable
 from .client import FronteggClient
 from .progress import info, progress, warn
 
-THROTTLE_SEC = 0.08           # 80 ms between calls = ~12 req/sec ceiling. Frontegg's documented default is 1000 req/min/IP for Scale/Enterprise tiers — we run at ~25% of that headroom.
 PAGE_SIZE_TENANTS = 200       # max accepted by /tenants/v2. NB: `_offset` on this endpoint is a PAGE INDEX (0..totalPages-1), not an item offset.
 PAGE_SIZE_USERS = 200         # max accepted by /users/v3. Same page-index `_offset` quirk.
 ENTITLEMENTS_LIMIT = 10       # /entitlements/v2 silently caps `limit` at 10. Values above this return 0 items. We paginate until empty.
@@ -49,7 +49,6 @@ def pull_pages_by_pageindex(
             break
         if page % 5 == 0:
             progress(f"page {page} done; {label} so far: {len(all_items)}/{total or '?'}")
-        time.sleep(THROTTLE_SEC)
     return all_items
 
 
@@ -76,7 +75,6 @@ def pull_paginated_limit_offset(
         all_items.extend(items)
         offset += limit
         progress(f"{label}: {len(all_items)} so far")
-        time.sleep(THROTTLE_SEC)
         if offset > SAFETY_OFFSET_CAP:
             warn(f"safety cap hit at offset={offset} on {path}")
             break
@@ -97,7 +95,6 @@ def pull_entitlements(client: FronteggClient) -> list[dict]:
         offset += ENTITLEMENTS_LIMIT
         if offset % 500 == 0:
             progress(f"entitlements offset={offset}, {len(all_items)} pulled")
-        time.sleep(THROTTLE_SEC)
         if offset > SAFETY_OFFSET_CAP:
             warn(f"safety cap hit at offset={offset} on /entitlements/v2")
             break
@@ -115,7 +112,6 @@ def pull_hierarchy(client: FronteggClient, tenants: list[dict]) -> list[dict]:
         tree = client.get("/tenants/resources/hierarchy/v1/tree", tenant_id=tid)
         if tree:
             trees.append(tree)
-        time.sleep(THROTTLE_SEC)
     return trees
 
 
@@ -146,7 +142,6 @@ def pull_user_role_assignments(client: FronteggClient, users: list[dict]) -> lis
                 continue
             if isinstance(resp, list):
                 all_assignments.extend(resp)
-            time.sleep(THROTTLE_SEC)
         if i % 100 == 0 or i == total_tenants:
             elapsed = time.time() - t0
             rate = i / elapsed if elapsed else 0

@@ -93,10 +93,11 @@ class RedirectTests(unittest.TestCase):
 
 class FullExportTrafficTests(unittest.TestCase):
     def test_full_export_sends_only_get_and_the_token_post(self):
+        import functools
         import os
         import tempfile
 
-        from frontegg_data_export import fetch, logs, runner
+        from frontegg_data_export import logs, runner
         from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg, make_dataset
 
         with MockFrontegg(make_dataset()) as m, tempfile.TemporaryDirectory() as tmp:
@@ -105,7 +106,8 @@ class FullExportTrafficTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env), \
                     mock.patch.object(runner, "APP_DIR", Path(tmp)), \
                     mock.patch.object(runner, "DOTENV_PATH", Path(tmp) / ".env"), \
-                    mock.patch.object(fetch, "THROTTLE_SEC", 0), \
+                    mock.patch.object(runner, "FronteggClient",
+                                      functools.partial(FronteggClient, sleep=lambda s: None)), \
                     mock.patch.object(logs, "LOG_PATH", Path(tmp) / "export.log"), \
                     mock.patch.object(logs, "_log_fp", None), \
                     mock.patch("sys.stdout"):

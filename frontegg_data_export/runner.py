@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 
 from .client import FronteggClient
-from .config import APP_DIR, DOTENV_PATH, LOG_PATH, load_config
+from .config import APP_DIR, DOTENV_PATH, LOG_PATH, load_config, parse_rate
 from .fetch import (
     PAGE_SIZE_TENANTS,
     PAGE_SIZE_USERS,
@@ -20,7 +20,7 @@ from .fetch import (
 from .progress import banner, info, ok, step
 
 
-def main() -> int:
+def main(rate: str | float | None = None) -> int:
     started_at = datetime.now(timezone.utc)
 
     env = load_config(DOTENV_PATH)
@@ -38,7 +38,8 @@ def main() -> int:
 
     # ---- 1. Authenticate ---------------------------------------------------
     step(1, NSTEPS, "Authenticate with vendor endpoint")
-    client = FronteggClient(base_url, env["FRONTEGG_CLIENT_ID"], env["FRONTEGG_CLIENT_SECRET"])
+    client = FronteggClient(base_url, env["FRONTEGG_CLIENT_ID"], env["FRONTEGG_CLIENT_SECRET"],
+                            rate=parse_rate(rate))
     client.authenticate()
     ok("Authenticated. Token valid ~24h.")
 
