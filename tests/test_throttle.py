@@ -46,6 +46,25 @@ class ThrottleTests(unittest.TestCase):
         t.wait("/users")             # held until 2 s after the first /users
         self.assertEqual(clk.slept, [0.1, 1.9])
 
+    def test_coarse_clock_never_sleeps_for_a_nanosecond(self):
+        """Windows before Python 3.13: monotonic() ticks every ~15 ms, so
+        back-to-back calls read the same time."""
+        clk = FakeClock()
+        frozen = lambda: 1000.0  # noqa: E731
+        t = Throttle(1e9, {}, clock=frozen, sleep=clk.sleep)
+        for _ in range(5):
+            t.wait("/a")
+        self.assertEqual(clk.slept, [])
+
+    def test_coarse_clock_still_paces_at_the_rate(self):
+        clk = FakeClock()
+        t = Throttle(4.0, {}, clock=clk, sleep=clk.sleep)
+        t.wait("/a")
+        clk.now += 0.0005            # less than one clock tick passes
+        t.wait("/a")
+        t.wait("/a")
+        self.assertEqual(clk.slept, [0.2495, 0.25])
+
     def test_pause_holds_every_request(self):
         clk = FakeClock()
         t = Throttle(4.0, {}, clock=clk, sleep=clk.sleep)

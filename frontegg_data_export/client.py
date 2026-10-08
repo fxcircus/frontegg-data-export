@@ -39,6 +39,7 @@ BACKOFF_BASE = 1.0        # seconds; attempt n waits up to base * 2**n ...
 BACKOFF_CAP = 60.0        # ... but never more than this
 RETRY_AFTER_CAP = 300.0   # don't let a server park us for longer than 5 minutes
 RATE_LIMIT_RESET_CAP = 60.0
+MIN_SLEEP = 0.001         # throttle waits shorter than this aren't worth a sleep() call
 
 # Per-endpoint ceilings in requests per MINUTE. Frontegg documents per-vendor
 # limits for some endpoints that are much lower than the general per-IP limit
@@ -145,15 +146,20 @@ class Throttle:
         self._lock = threading.Lock()
 
     def wait(self, path: str) -> float:
-        """Block until a request to `path` may go out. Returns seconds waited."""
+        """Block until a request to `path` may go out. Returns seconds waited.
+
+        Waits under MIN_SLEEP are skipped rather than slept: the OS can't sleep
+        that precisely, and on Windows before Python 3.13 the monotonic clock
+        only ticks every ~15 ms, so back-to-back calls see the same time. The
+        schedule still advances from the ready time, so the rate doesn't drift."""
         with self._lock:
             now = self.clock()
             ready = max(self._next_any, self._next_path.get(path, 0.0))
             waited = 0.0
-            if ready > now:
+            if ready - now >= MIN_SLEEP:
                 waited = ready - now
                 self.sleep(waited)
-                now = ready
+            now = max(now, ready)
             self._next_any = now + self.interval
             if path in self.ceilings:
                 self._next_path[path] = now + self.ceilings[path]
