@@ -29,10 +29,12 @@ from .fetch import (
     walk_tree,
 )
 from .logs import RunLog
+from .model import build_model
 from .progress import Reporter
 from .sections import STEP_LABELS, Selection, resolve
 from .status import EXIT_CODES, EXIT_INTERRUPTED, FAILED, PARTIAL, SUCCEEDED, CoreSectionFailed, Failure, overall_status
-from .store import DEFAULT_KEEP, Busy, Store, atomic_open, atomic_write_json
+from .snapshot import build_snapshot, counts_for
+from .store import DEFAULT_KEEP, Busy, Store, atomic_write_json
 
 
 class Run:
@@ -60,6 +62,8 @@ class Run:
         self.failed_role_tenants: list[str] = []
         self.failed_roots: list[str] = []
         self.status = ""
+        self.section_notes: dict[str, dict] = {}
+        self.model: dict | None = None
 
     # ---- driving ----------------------------------------------------------
     def execute(self) -> int:
@@ -199,32 +203,53 @@ class Run:
                     return item["vendorId"]
         return None
 
-    def _write_outputs(self) -> None:
+    def _section_status(self) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for sec in self.selection.sections:
+            entry: dict[str, Any] = {"status": "ok"}
+            if sec == "roles" and self.failed_role_tenants:
+                entry = {"status": "partial", "failedAccounts": len(self.failed_role_tenants)}
+            if sec == "hierarchy" and self.failed_roots:
+                entry = {"status": "partial", "failedTrees": len(self.failed_roots)}
+            entry.update(self.section_notes.get(sec, {}))
+            out[sec] = entry
+        return out
+
+    def _run_meta(self) -> dict:
         c = self.client
-        output = {
-            "schemaVersion": "1.0",
-            "exportRun": {
-                "status": self.status,
-                "preset": self.selection.preset,
-                "sections": list(self.selection.sections),
-                "failures": [f.to_dict() for f in self.failures],
-                "failedRoleLookupTenants": self.failed_role_tenants,
-                "failedHierarchyRoots": self.failed_roots,
-                "startedAt": self.started_at.isoformat(),
-                "baseUrl": self.base_url,
-                "vendorId": self._vendor_id(),
-                "apiCalls": c.calls,
-                "errors": c.errors,
-                "retries": c.retries,
-                "rateLimit429s": c.h429,
-                "rateLimitHeadersSeen": c.rate_limit_headers_seen,
-                "lastTraceId": c.last_trace_id,
-                "steps": self.step_stats,
-            },
-            "counts": {k: len(v) for k, v in self.data.items()},
-            **self.data,
+        ended_at = datetime.now(timezone.utc)
+        return {
+            "id": self.run_id,
+            "status": self.status,
+            "trigger": self.trigger,
+            "preset": self.selection.preset,
+            "sections": list(self.selection.sections),
+            "rolesIncluded": self.selection.has("roles"),
+            "startedAt": self.started_at.isoformat(timespec="seconds"),
+            "endedAt": ended_at.isoformat(timespec="seconds"),
+            "durationSeconds": int((ended_at - self.started_at).total_seconds()),
+            "baseUrl": self.base_url,
+            "vendorId": self._vendor_id(),
+            "rateLimitPerSecond": self.rate,
+            "apiCalls": c.calls,
+            "retries": c.retries,
+            "errors": c.errors,
+            "rateLimit429s": c.h429,
+            "rateLimitHeadersSeen": c.rate_limit_headers_seen,
+            "lastTraceId": c.last_trace_id,
+            "failedRoleLookupTenants": self.failed_role_tenants,
+            "failedHierarchyRoots": self.failed_roots,
+            "steps": self.step_stats,
         }
-        self._write_json("snapshot.json", output)
+
+    def _write_outputs(self) -> None:
+        self.model = build_model(self.data, sections=self.selection.sections, run_started_at=self.started_at,
+                                 failed_role_tenants=self.failed_role_tenants, failed_roots=self.failed_roots)
+        snapshot = build_snapshot(self._run_meta(), self._section_status(),
+                                  [f.to_dict() for f in self.failures], self.data, self.failed_role_tenants)
+        self._write_json("snapshot.json", snapshot)
+        atomic_write_json(self.run_dir / "normalized.json", self.model, indent=None)
+        self.files.append("normalized.json")
         size = (self.run_dir / "snapshot.json").stat().st_size / 1_048_576
         self.reporter.step_done("write", f"Wrote snapshot.json ({size:.1f} MB)")
 
@@ -257,7 +282,8 @@ class Run:
             "rateLimit429s": c.h429,
             "rateLimitHeadersSeen": c.rate_limit_headers_seen,
             "lastTraceId": c.last_trace_id,
-            "counts": {k: len(v) for k, v in self.data.items()} if self.status != FAILED else {},
+            "counts": counts_for(self.data) if self.status != FAILED else {},
+            "sectionStatus": self._section_status() if self.status != FAILED else {},
             "steps": self.step_stats,
             "failures": [f.to_dict() for f in self.failures],
             "warnings": self.reporter.warnings,

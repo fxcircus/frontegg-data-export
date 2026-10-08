@@ -19,10 +19,11 @@ class RunStatusTests(unittest.TestCase):
             r = run_export(m, tmp)
             self.assertEqual(r.code, 0)
             snap = r.snapshot()
-            self.assertEqual(snap["exportRun"]["status"], "succeeded")
+            self.assertEqual(snap["run"]["status"], "succeeded")
             self.assertEqual(r.summary()["status"], "succeeded")
             self.assertEqual(r.history()["baselineRunId"], r.run_dir.name)
-            self.assertEqual(snap["exportRun"]["failures"], [])
+            self.assertEqual(snap["failures"], [])
+            self.assertEqual(snap["schemaVersion"], "2.0")
             self.assertEqual(snap["counts"]["userRoleAssignments"], len(ds.role_assignments))
 
     def test_failed_role_lookup_is_partial_with_exit_2(self):
@@ -31,10 +32,11 @@ class RunStatusTests(unittest.TestCase):
         with MockFrontegg(ds, Faults(failing_role_tenants={bad})) as m, temp_dir() as tmp:
             r = run_export(m, tmp)
             self.assertEqual(r.code, 2)
-            run = r.snapshot()["exportRun"]
+            run = r.snapshot()["run"]
             self.assertEqual(run["status"], "partial")
             self.assertEqual(run["failedRoleLookupTenants"], [bad])
-            [f] = run["failures"]
+            self.assertEqual(r.snapshot()["sections"]["roles"], {"status": "partial", "failedAccounts": 1})
+            [f] = r.snapshot()["failures"]
             self.assertEqual((f["section"], f["tenantId"], f["httpStatus"]), ("roles", bad, 500))
             self.assertTrue(f["traceId"])
             self.assertIn("support", f["hint"])
@@ -49,10 +51,11 @@ class RunStatusTests(unittest.TestCase):
         with MockFrontegg(ds, Faults(failing_tree_tenants={root})) as m, temp_dir() as tmp:
             r = run_export(m, tmp)
             self.assertEqual(r.code, 2)
-            run = r.snapshot()["exportRun"]
+            run = r.snapshot()["run"]
             self.assertEqual(run["failedHierarchyRoots"], [root])
-            self.assertEqual(run["failures"][0]["section"], "hierarchy")
-            self.assertIn("loop", run["failures"][0]["hint"])
+            failures = r.snapshot()["failures"]
+            self.assertEqual(failures[0]["section"], "hierarchy")
+            self.assertIn("loop", failures[0]["hint"])
             self.assertEqual(r.snapshot()["counts"]["hierarchyTrees"], 1)
 
     def test_core_list_failure_fails_with_exit_1_and_writes_nothing(self):
@@ -80,7 +83,7 @@ class RunStatusTests(unittest.TestCase):
         with MockFrontegg(ds, Faults(error_5xx_every=4, rate_limit_every=7)) as m, temp_dir() as tmp:
             r = run_export(m, tmp)
             self.assertEqual(r.code, 0)
-            self.assertGreater(r.snapshot()["exportRun"]["retries"], 0)
+            self.assertGreater(r.snapshot()["run"]["retries"], 0)
 
     def test_414_halves_the_role_batch(self):
         ds = make_dataset()

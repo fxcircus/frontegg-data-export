@@ -111,7 +111,8 @@ class PresetRunTests(unittest.TestCase):
             self.assertNotIn("/entitlements/resources/entitlements/v2", paths)
             self.assertNotIn("/tenants/resources/hierarchy/v1/tree", paths)
             self.assertIn("/identity/resources/users/v3/roles", paths)
-            self.assertEqual(set(r.snapshot()["counts"]), {"roles", "tenants", "users", "userRoleAssignments"})
+            self.assertEqual(set(r.snapshot()["counts"]),
+                             {"roles", "accounts", "resellerAccounts", "users", "userRoleAssignments"})
 
     def test_roles_toggle_off_skips_the_expensive_step(self):
         with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:
@@ -120,7 +121,7 @@ class PresetRunTests(unittest.TestCase):
 
     def test_step_stats_are_recorded_for_the_next_estimate(self):
         with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:
-            steps = run_export(m, tmp, preset="full").snapshot()["exportRun"]["steps"]
+            steps = run_export(m, tmp, preset="full").snapshot()["run"]["steps"]
             self.assertEqual(steps["users"]["calls"], 2)
             self.assertGreater(steps["roles"]["calls"], 10)
 
