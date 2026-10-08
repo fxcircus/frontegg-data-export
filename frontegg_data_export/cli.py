@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, runner
+from .client import ApiError
 from .config import (
     ConfigError,
     RATE_PRESETS,
@@ -246,6 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         return COMMANDS[args.command](args)
     except ConfigError as e:
         print(str(e), file=sys.stderr)
+        return EXIT_CODES[FAILED]
+    except ApiError as e:
+        print(e.message + (f" (trace ID {e.trace_id})" if e.trace_id else ""), file=sys.stderr)
         return EXIT_CODES[FAILED]
     except KeyboardInterrupt:
         print("Stopped before finishing (interrupted).", file=sys.stderr)
