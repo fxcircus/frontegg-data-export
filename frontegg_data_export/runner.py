@@ -28,13 +28,14 @@ from .fetch import (
     pull_user_role_assignments,
     walk_tree,
 )
+from .diff import CHANGES_HEADER, diff_models, first_run_summary
 from .logs import RunLog
 from .model import build_model
 from .progress import Reporter
 from .sections import STEP_LABELS, Selection, resolve
 from .status import EXIT_CODES, EXIT_INTERRUPTED, FAILED, PARTIAL, SUCCEEDED, CoreSectionFailed, Failure, overall_status
 from .snapshot import build_snapshot, counts_for
-from .store import DEFAULT_KEEP, Busy, Store, atomic_write_json
+from .store import DEFAULT_KEEP, Busy, Store, atomic_write_json, read_json
 
 
 class Run:
@@ -68,6 +69,7 @@ class Run:
         self.status = ""
         self.section_notes: dict[str, dict] = {}
         self.model: dict | None = None
+        self.changes: dict | None = None
 
     # ---- driving ----------------------------------------------------------
     def execute(self) -> int:
@@ -130,6 +132,7 @@ class Run:
         self.status = overall_status(self.failures, core_failed=False)
         r.step("write", STEP_LABELS["write"], len(sel.steps), len(sel.steps))
         self._write_outputs()
+        self._compare_with_baseline()
         return self._finish()
 
     def _core(self, section: str, fn: Callable[[], Any]) -> Any:
@@ -269,6 +272,33 @@ class Run:
             self.notes.append(note)
             self.reporter.info(note)
 
+    def _compare_with_baseline(self) -> None:
+        """Diff this run against the baseline (the last succeeded run, or a
+        partial run the user accepted) and write changes.csv."""
+        baseline_id = self.store.baseline_id()
+        old = read_json(self.store.run_dir(baseline_id) / "normalized.json") if baseline_id else None
+        if old is None:
+            changes, summary = [], first_run_summary()
+            baseline_id = None
+        else:
+            changes, summary = diff_models(old, self.model)
+        self.changes = {"comparedWith": baseline_id, **summary}
+        if "csv" in self.formats:
+            self.rows["changes.csv"] = csvout.write_csv(self.run_dir / "changes.csv", CHANGES_HEADER,
+                                                        (c.row() for c in changes))
+            self.files.append("changes.csv")
+        if baseline_id is None:
+            self.reporter.info(summary["message"])
+        else:
+            c = summary["counts"]
+            self.reporter.info(
+                f"Compared with {baseline_id}: {summary['total']} change(s). Users +{c['usersAdded']} "
+                f"-{c['usersRemoved']} ~{c['usersChanged']}, accounts +{c['accountsAdded']} -{c['accountsRemoved']}, "
+                f"plan assignments +{c['planAssignmentsAdded']} -{c['planAssignmentsRemoved']}. "
+                f"{summary['usersLoggedInSince']} user(s) logged in since then.")
+            for note in summary["notCompared"]:
+                self.reporter.info(f"  Not compared: {note}")
+
     def _write_json(self, name: str, data: Any) -> None:
         atomic_write_json(self.run_dir / name, data)
         self.files.append(name)
@@ -305,6 +335,7 @@ class Run:
             "warnings": self.reporter.warnings,
             "notes": self.notes,
             "rows": self.rows,
+            "changes": self.changes,
             "files": sorted(set(self.files + ["summary.json", "run.log"])),
             "usableAsBaseline": usable,
         }

@@ -133,7 +133,7 @@ class EndToEndCsvTests(unittest.TestCase):
         with MockFrontegg(ds) as m, temp_dir() as tmp:
             r = run_export(m, tmp)
             names = sorted(p.name for p in r.run_dir.glob("*.csv"))
-            self.assertEqual(names, ["accounts.csv", "plan_assignments.csv", "users.csv",
+            self.assertEqual(names, ["accounts.csv", "changes.csv", "plan_assignments.csv", "users.csv",
                                      "users_without_plan.csv"])
             users = read_csv(r.run_dir / "users.csv")
             self.assertEqual(len(users), sum(max(1, len(u["tenantIds"])) for u in ds.users))
@@ -150,7 +150,7 @@ class EndToEndCsvTests(unittest.TestCase):
     def test_users_only_preset_writes_only_users_csv(self):
         with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:
             r = run_export(m, tmp, preset="users")
-            self.assertEqual(sorted(p.name for p in r.run_dir.glob("*.csv")), ["users.csv"])
+            self.assertEqual(sorted(p.name for p in r.run_dir.glob("*.csv")), ["changes.csv", "users.csv"])
             users = read_csv(r.run_dir / "users.csv")
             self.assertTrue(all(u["account_name"] for u in users if u["account_id"]))
             self.assertTrue(any(u["roles"] for u in users))
