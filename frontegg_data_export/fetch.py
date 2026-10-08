@@ -11,8 +11,9 @@ from __future__ import annotations
 import time
 from typing import Iterable
 
-from .client import FronteggClient
+from .client import ApiError, FronteggClient
 from .progress import info, progress, warn
+from .status import Failure
 
 PAGE_SIZE_TENANTS = 200       # max accepted by /tenants/v2. NB: `_offset` on this endpoint is a PAGE INDEX (0..totalPages-1), not an item offset.
 PAGE_SIZE_USERS = 200         # max accepted by /users/v3. Same page-index `_offset` quirk.
@@ -101,23 +102,56 @@ def pull_entitlements(client: FronteggClient) -> list[dict]:
     return all_items
 
 
-def pull_hierarchy(client: FronteggClient, tenants: list[dict]) -> list[dict]:
+def pull_hierarchy(client: FronteggClient, tenants: list[dict],
+                   failures: list[Failure]) -> tuple[list[dict], list[str]]:
     """`/tenants/hierarchy/v1*` endpoints require a `frontegg-tenant-id` header.
     Only tenants with `isReseller: true` have non-trivial trees; every other
-    tenant is flat. So we only call once per reseller — O(reseller count)."""
+    tenant is flat. So we only call once per reseller — O(reseller count).
+
+    A tree that can't be read (e.g. 400 for a circular hierarchy) is recorded
+    as a failure and skipped; the rest of the export carries on.
+    Returns (trees, root tenant IDs whose tree failed)."""
     resellers = [t for t in tenants if t.get("isReseller")]
     info(f"resellers (hierarchy roots): {len(resellers)}")
     trees: list[dict] = []
+    failed_roots: list[str] = []
     for tid in (r["tenantId"] for r in resellers):
-        tree = client.get("/tenants/resources/hierarchy/v1/tree", tenant_id=tid)
+        try:
+            tree = client.get("/tenants/resources/hierarchy/v1/tree", tenant_id=tid)
+        except ApiError as e:
+            failures.append(Failure.from_error("hierarchy", e, tenant_id=tid))
+            failed_roots.append(tid)
+            warn(f"hierarchy tree failed for account {tid}: {e.message}")
+            continue
         if tree:
             trees.append(tree)
-    return trees
+    return trees, failed_roots
 
 
-def pull_user_role_assignments(client: FronteggClient, users: list[dict]) -> list[dict]:
+def _lookup_roles(client: FronteggClient, tenant_id: str, user_ids: list[str]) -> list[dict]:
+    """One batched lookup, halving the batch if the URL is still too long
+    for the server (HTTP 414) — a safety net under ROLES_BATCH_SIZE."""
+    try:
+        resp = client.get("/identity/resources/users/v3/roles", {"ids": ",".join(user_ids)},
+                          tenant_id=tenant_id)
+    except ApiError as e:
+        if e.status == 414 and len(user_ids) > 1:
+            half = len(user_ids) // 2
+            warn(f"URL too long for {len(user_ids)} IDs; retrying in batches of {half}")
+            return (_lookup_roles(client, tenant_id, user_ids[:half])
+                    + _lookup_roles(client, tenant_id, user_ids[half:]))
+        raise
+    return resp if isinstance(resp, list) else []
+
+
+def pull_user_role_assignments(client: FronteggClient, users: list[dict],
+                               failures: list[Failure]) -> tuple[list[dict], list[str]]:
     """For each `(tenant, [user-ids])`, one batched call to /v3/roles?ids=…
-    (Up to ROLES_BATCH_SIZE ids per call, tenant scoped via header.)"""
+    (Up to ROLES_BATCH_SIZE ids per call, tenant scoped via header.)
+
+    A tenant whose lookup fails is recorded as a failure (with its trace ID)
+    and its roles are treated as unknown, not empty.
+    Returns (assignments, tenant IDs whose lookup failed)."""
     by_tenant: dict[str, list[str]] = {}
     for u in users:
         tenant_ids = u.get("tenantIds") or ([u["tenantId"]] if u.get("tenantId") else [])
@@ -127,28 +161,27 @@ def pull_user_role_assignments(client: FronteggClient, users: list[dict]) -> lis
     total_tenants = len(by_tenant)
     info(f"tenants with users to query: {total_tenants}")
     all_assignments: list[dict] = []
+    failed_tenants: list[str] = []
     t0 = time.time()
     for i, (tid, user_ids) in enumerate(by_tenant.items(), 1):
-        for chunk_start in range(0, len(user_ids), ROLES_BATCH_SIZE):
-            chunk = user_ids[chunk_start:chunk_start + ROLES_BATCH_SIZE]
-            try:
-                resp = client.get(
-                    "/identity/resources/users/v3/roles",
-                    {"ids": ",".join(chunk)},
-                    tenant_id=tid,
-                )
-            except Exception as e:
-                warn(f"role pull failed for tenant {tid}: {e}")
-                continue
-            if isinstance(resp, list):
-                all_assignments.extend(resp)
+        tenant_rows: list[dict] = []
+        try:
+            for chunk_start in range(0, len(user_ids), ROLES_BATCH_SIZE):
+                chunk = user_ids[chunk_start:chunk_start + ROLES_BATCH_SIZE]
+                tenant_rows.extend(_lookup_roles(client, tid, chunk))
+        except ApiError as e:
+            failures.append(Failure.from_error("roles", e, tenant_id=tid))
+            failed_tenants.append(tid)
+            warn(f"role lookup failed for account {tid}: {e.message}")
+        else:
+            all_assignments.extend(tenant_rows)
         if i % 100 == 0 or i == total_tenants:
             elapsed = time.time() - t0
             rate = i / elapsed if elapsed else 0
             eta_s = int((total_tenants - i) / rate) if rate else 0
             progress(f"tenants {i}/{total_tenants}  assignments={len(all_assignments)}  "
                      f"elapsed={int(elapsed)}s  eta≈{eta_s}s")
-    return all_assignments
+    return all_assignments, failed_tenants
 
 
 # --------------------------------------------------------------------------- #

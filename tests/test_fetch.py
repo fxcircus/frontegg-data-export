@@ -72,7 +72,8 @@ class FetchTests(unittest.TestCase):
 
     def test_hierarchy_one_call_per_reseller_with_tenant_header(self):
         tenants = list(self.ds.tenants)
-        trees = fetch.pull_hierarchy(self.client, tenants)
+        trees, failed = fetch.pull_hierarchy(self.client, tenants, [])
+        self.assertEqual(failed, [])
         resellers = [t["tenantId"] for t in tenants if t["isReseller"]]
         self.assertEqual([t["tenantId"] for t in trees], resellers)
         calls = self.mock.calls_to("/tenants/resources/hierarchy/v1/tree")
@@ -111,7 +112,8 @@ class FetchTests(unittest.TestCase):
 
     def test_role_lookups_batched_per_tenant_in_chunks_of_100(self):
         users = list(self.ds.users)
-        assignments = fetch.pull_user_role_assignments(self.client, users)
+        assignments, failed = fetch.pull_user_role_assignments(self.client, users, [])
+        self.assertEqual(failed, [])
         self.assertEqual(len(assignments), len(self.ds.role_assignments))
         big = next(t["tenantId"] for t in self.ds.tenants if t["name"] == "Acme Big")
         big_calls = [c for c in self.mock.calls_to("/identity/resources/users/v3/roles") if c["tenant"] == big]

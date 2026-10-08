@@ -93,27 +93,11 @@ class RedirectTests(unittest.TestCase):
 
 class FullExportTrafficTests(unittest.TestCase):
     def test_full_export_sends_only_get_and_the_token_post(self):
-        import functools
-        import os
-        import tempfile
+        from tests.helpers import run_export, temp_dir
+        from tests.mock_frontegg import MockFrontegg, make_dataset
 
-        from frontegg_data_export import logs, runner
-        from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg, make_dataset
-
-        with MockFrontegg(make_dataset()) as m, tempfile.TemporaryDirectory() as tmp:
-            env = {"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": CLIENT_SECRET,
-                   "FRONTEGG_BASE_URL": m.url}
-            with mock.patch.dict(os.environ, env), \
-                    mock.patch.object(runner, "APP_DIR", Path(tmp)), \
-                    mock.patch.object(runner, "DOTENV_PATH", Path(tmp) / ".env"), \
-                    mock.patch.object(runner, "FronteggClient",
-                                      functools.partial(FronteggClient, sleep=lambda s: None)), \
-                    mock.patch.object(logs, "LOG_PATH", Path(tmp) / "export.log"), \
-                    mock.patch.object(logs, "_log_fp", None), \
-                    mock.patch("sys.stdout"):
-                self.assertEqual(runner.main(), 0)
-                if logs._log_fp:
-                    logs._log_fp.close()
+        with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:
+            self.assertEqual(run_export(m, tmp).code, 0)
             methods = {(r["method"], r["path"] if r["method"] != "GET" else "*") for r in m.requests}
             self.assertEqual(methods, {("GET", "*"), ("POST", "/auth/vendor/")})
             self.assertGreater(len(m.requests), 20)
