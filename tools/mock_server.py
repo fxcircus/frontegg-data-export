@@ -37,10 +37,13 @@ def main() -> int:
     ap.add_argument("--rate-limit-every", type=int, default=0, metavar="N", help="every Nth GET returns 429")
     args = ap.parse_args()
 
-    now = datetime.now(timezone.utc)
-    ds = make_dataset(seed=args.seed, tenants=args.tenants, big_tenant_users=args.big_tenant_users, now=now)
+    # Anchor generated timestamps to today's midnight (UTC) so restarting the
+    # mock (for example to switch to --variant 2) serves the same data, and the
+    # diff shows only the deliberate changes.
+    anchor = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    ds = make_dataset(seed=args.seed, tenants=args.tenants, big_tenant_users=args.big_tenant_users, now=anchor)
     if args.variant == 2:
-        mutate(ds, now=now)
+        mutate(ds, now=datetime.now(timezone.utc))
     faults = Faults(audits_mode=args.audits, error_5xx_every=args.flaky, rate_limit_every=args.rate_limit_every,
                     retry_after="1")
     small = [t["tenantId"] for t in ds.tenants if t["name"] != "Acme Big"]
