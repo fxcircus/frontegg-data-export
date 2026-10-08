@@ -28,6 +28,10 @@ class ExportResult:
         self.out_dir = out_dir
         self.stdout = stdout
         self.stderr = stderr
+        dirs = self.run_dirs()
+        # This export's folder, fixed now: later exports into the same folder
+        # must not change what this result points at.
+        self._run_dir = dirs[-1] if dirs else None
 
     def run_dirs(self) -> list[Path]:
         runs = self.out_dir / "runs"
@@ -35,7 +39,8 @@ class ExportResult:
 
     @property
     def run_dir(self) -> Path:
-        return self.run_dirs()[-1]
+        assert self._run_dir is not None, "this export created no run folder"
+        return self._run_dir
 
     def json_files(self) -> list[Path]:
         return sorted(self.out_dir.glob("runs/*/snapshot.json"))
