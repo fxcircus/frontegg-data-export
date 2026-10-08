@@ -20,6 +20,8 @@ class RunStatusTests(unittest.TestCase):
             self.assertEqual(r.code, 0)
             snap = r.snapshot()
             self.assertEqual(snap["exportRun"]["status"], "succeeded")
+            self.assertEqual(r.summary()["status"], "succeeded")
+            self.assertEqual(r.history()["baselineRunId"], r.run_dir.name)
             self.assertEqual(snap["exportRun"]["failures"], [])
             self.assertEqual(snap["counts"]["userRoleAssignments"], len(ds.role_assignments))
 
@@ -61,7 +63,10 @@ class RunStatusTests(unittest.TestCase):
             self.assertEqual(r.code, 1)
             self.assertEqual(r.json_files(), [])
             self.assertIn("users", r.stderr)
-            self.assertIn("nothing was written", r.stdout)
+            self.assertIn("no export files were written", r.stdout)
+            self.assertEqual(sorted(p.name for p in r.run_dir.iterdir()), ["run.log", "summary.json"])
+            self.assertEqual(r.summary()["status"], "failed")
+            self.assertIsNone(r.history()["baselineRunId"])
 
     def test_bad_credentials_fail_with_exit_1(self):
         with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:

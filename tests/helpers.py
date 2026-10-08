@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 import io
 import json
 import os
@@ -11,7 +10,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from frontegg_data_export import logs, runner
+from frontegg_data_export import runner
 from frontegg_data_export.client import FronteggClient
 from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg
 
@@ -28,31 +27,36 @@ class ExportResult:
         self.stdout = stdout
         self.stderr = stderr
 
+    def run_dirs(self) -> list[Path]:
+        runs = self.out_dir / "runs"
+        return sorted(p for p in runs.iterdir() if p.is_dir()) if runs.is_dir() else []
+
+    @property
+    def run_dir(self) -> Path:
+        return self.run_dirs()[-1]
+
     def json_files(self) -> list[Path]:
-        return sorted(self.out_dir.glob("frontegg_account_backup_*.json"))
+        return sorted(self.out_dir.glob("runs/*/snapshot.json"))
 
     def snapshot(self) -> dict:
-        files = self.json_files()
-        assert len(files) == 1, files
-        return json.loads(files[0].read_text(encoding="utf-8"))
+        return json.loads((self.run_dir / "snapshot.json").read_text(encoding="utf-8"))
+
+    def summary(self) -> dict:
+        return json.loads((self.run_dir / "summary.json").read_text(encoding="utf-8"))
+
+    def history(self) -> dict:
+        return json.loads((self.out_dir / "history.json").read_text(encoding="utf-8"))
 
 
-def run_export(m: MockFrontegg, tmp: str, secret: str = CLIENT_SECRET, **kwargs) -> ExportResult:
+def run_export(m: MockFrontegg, out_dir: str | Path, secret: str = CLIENT_SECRET, **kwargs) -> ExportResult:
     env = {"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": secret, "FRONTEGG_BASE_URL": m.url}
     out, errs = io.StringIO(), io.StringIO()
     with mock.patch.dict(os.environ, env), \
-            mock.patch.object(runner, "APP_DIR", Path(tmp)), \
-            mock.patch.object(runner, "DOTENV_PATH", Path(tmp) / ".env"), \
-            mock.patch.object(runner, "FronteggClient", functools.partial(fast_client)), \
-            mock.patch.object(logs, "LOG_PATH", Path(tmp) / "export.log"), \
-            mock.patch.object(logs, "_log_fp", None), \
+            mock.patch.object(runner, "DOTENV_PATH", Path(out_dir) / ".env-absent"), \
+            mock.patch.object(runner, "FronteggClient", fast_client), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(errs):
-        try:
-            code = runner.main(**kwargs)
-        finally:
-            if logs._log_fp:
-                logs._log_fp.close()
-    return ExportResult(code, Path(tmp), out.getvalue(), errs.getvalue())
+        code = runner.main(out_dir=out_dir, **kwargs)
+    return ExportResult(code, Path(out_dir), out.getvalue(), errs.getvalue())
 
 
 @contextlib.contextmanager

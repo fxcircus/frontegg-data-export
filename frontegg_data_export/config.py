@@ -7,7 +7,16 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent.parent
 DOTENV_PATH = APP_DIR / ".env"
-LOG_PATH = APP_DIR / "export.log"
+
+
+def data_dir() -> Path:
+    """Settings, logs and (where no OS store exists) the stored key live here:
+    `<app>/data`, or $FDE_HOME."""
+    return Path(os.environ.get("FDE_HOME") or APP_DIR / "data").expanduser()
+
+
+def default_output_dir() -> Path:
+    return APP_DIR / "exports"
 
 REQUIRED_VARS = ("FRONTEGG_CLIENT_ID", "FRONTEGG_CLIENT_SECRET", "FRONTEGG_BASE_URL")
 

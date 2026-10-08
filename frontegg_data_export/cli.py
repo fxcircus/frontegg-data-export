@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys
 
 from . import runner
-from .logs import _log
+from .config import data_dir
+from .logs import app_logger
 from .status import EXIT_INTERRUPTED
 
 
@@ -19,7 +20,7 @@ def main() -> int:
         raise
     except Exception as exc:
         print(f"Fatal: {exc!r}", file=sys.stderr)
-        _log(f"Fatal: {exc!r}", "ERROR")
+        app_logger(data_dir() / "logs").exception("Fatal error in the command line")
         return 1
 
 

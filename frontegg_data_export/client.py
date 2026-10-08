@@ -28,7 +28,7 @@ import urllib.request
 from datetime import timezone
 from typing import Any, Callable
 
-from .logs import _log
+from .logs import REDACTOR, null_log
 
 HTTP_TIMEOUT = 30
 AUTH_PATH = "/auth/vendor/"
@@ -207,10 +207,13 @@ class FronteggClient:
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], float] = time.time,
-                 rand: Callable[[], float] = random.random) -> None:
+                 rand: Callable[[], float] = random.random,
+                 log: Callable[[str, str], None] = null_log) -> None:
         self.base_url = validate_base_url(base_url)
         self.client_id = client_id
         self.secret = secret
+        REDACTOR.add(secret)
+        self.log = log
         self.timeout = timeout
         self.max_attempts = max(1, max_attempts)
         self.backoff_base = backoff_base
@@ -267,7 +270,7 @@ class FronteggClient:
             except urllib.error.HTTPError as e:
                 trace = e.headers.get("frontegg-trace-id", "") if e.headers else ""
                 reason = _error_text(_read_error_body(e))
-                _log(f"POST {AUTH_PATH} -> {e.code} trace={trace}", "WARN")
+                self.log(f"POST {AUTH_PATH} -> {e.code} trace={trace}", "WARN")
                 if is_retryable_status(e.code) and not last:
                     if e.code == 429:
                         self.h429 += 1
@@ -276,7 +279,7 @@ class FronteggClient:
                 raise AuthError(_auth_failure_message(e.code, host, reason),
                                 status=e.code, method="POST", path=AUTH_PATH, trace_id=trace) from None
             except _NETWORK_ERRORS as e:
-                _log(f"POST {AUTH_PATH} network error: {_describe_network_error(e)}", "WARN")
+                self.log(f"POST {AUTH_PATH} network error: {_describe_network_error(e)}", "WARN")
                 if not last:
                     self._wait_before_retry(attempt, None)
                     continue
@@ -289,17 +292,18 @@ class FronteggClient:
             except (ValueError, KeyError, TypeError):
                 raise AuthError(f"{host} answered, but not like Frontegg's API. Check the API base URL.",
                                 method="POST", path=AUTH_PATH, trace_id=trace) from None
+            REDACTOR.add(token)
             self.token = token
             expires_in = int(payload.get("expiresIn") or 3600)
             self.token_expires_at = self.clock() + expires_in - 60  # 60s safety margin
-            _log(f"AUTH OK expiresIn={expires_in}s elapsed={self.clock()-t0:.2f}s trace={trace}")
+            self.log(f"AUTH OK expiresIn={expires_in}s elapsed={self.clock()-t0:.2f}s trace={trace}")
             return
         raise AssertionError("unreachable")
 
     def _ensure_token(self) -> None:
         if not self.token or self.clock() >= self.token_expires_at:
             if self.token:
-                _log("Re-authenticating (token expiring)…", "WARN")
+                self.log("Re-authenticating (token expiring)…", "WARN")
             self.authenticate()
 
     # ---- reads ------------------------------------------------------------
@@ -322,7 +326,7 @@ class FronteggClient:
                 status, resp_headers = e.code, (e.headers or {})
             except _NETWORK_ERRORS as e:
                 why = _describe_network_error(e)
-                _log(f"GET {target} network error: {why} attempt={attempt + 1}", "WARN")
+                self.log(f"GET {target} network error: {why} attempt={attempt + 1}", "WARN")
                 if not last:
                     self._wait_before_retry(attempt, None)
                     continue
@@ -341,7 +345,7 @@ class FronteggClient:
             elapsed = self.clock() - t0
             tenant_note = f" tenant={tenant_id}" if tenant_id else ""
             level = "INFO" if 200 <= status < 300 else "WARN"
-            _log(f"GET {target} -> {status} {elapsed:.2f}s trace={trace}{tenant_note} rl={rl_limit}", level)
+            self.log(f"GET {target} -> {status} {elapsed:.2f}s trace={trace}{tenant_note} rl={rl_limit}", level)
 
             if 200 <= status < 300:
                 try:
@@ -355,19 +359,19 @@ class FronteggClient:
                                    status=status, path=path, trace_id=trace) from None
             if status == 401 and not reauthed and not last:
                 reauthed = True
-                _log(f"GET {target} -> 401, getting a new token and retrying", "WARN")
+                self.log(f"GET {target} -> 401, getting a new token and retrying", "WARN")
                 self.token = None
                 continue
             if is_retryable_status(status) and not last:
                 if status == 429:
                     self.h429 += 1
                 delay = self._wait_before_retry(attempt, resp_headers.get("Retry-After"))
-                _log(f"GET {target} -> {status}; retrying in {delay:.1f}s (attempt {attempt + 2}/{self.max_attempts})",
+                self.log(f"GET {target} -> {status}; retrying in {delay:.1f}s (attempt {attempt + 2}/{self.max_attempts})",
                      "WARN")
                 continue
             self.errors += 1
             reason = _error_text(raw)
-            _log(f"GET {target} -> {status} {reason}", "ERROR")
+            self.log(f"GET {target} -> {status} {reason}", "ERROR")
             raise ApiError(f"HTTP {status}: {reason}" if reason else f"HTTP {status}",
                            status=status, path=path, trace_id=trace)
         raise AssertionError("unreachable")
@@ -390,7 +394,7 @@ class FronteggClient:
         if reset_s > 1e9:                       # an epoch timestamp, not a delta
             reset_s -= self.wall_clock()
         pause = min(max(reset_s, 0.0), RATE_LIMIT_RESET_CAP)
-        _log(f"rate-limit window used up; pausing {pause:.1f}s", "WARN")
+        self.log(f"rate-limit window used up; pausing {pause:.1f}s", "WARN")
         self.throttle.pause(pause)
 
 

@@ -4,12 +4,14 @@ through here."""
 
 from __future__ import annotations
 
-import json
+import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
 from .client import ApiError, AuthError, FronteggClient
-from .config import APP_DIR, DOTENV_PATH, LOG_PATH, load_config, parse_rate
+from .config import DOTENV_PATH, default_output_dir, load_config, parse_rate
 from .fetch import (
     PAGE_SIZE_TENANTS,
     PAGE_SIZE_USERS,
@@ -26,18 +28,27 @@ from .fetch import (
     pull_user_role_assignments,
     walk_tree,
 )
-from .logs import _log
+from .logs import RunLog
 from .progress import Reporter
 from .sections import STEP_LABELS, Selection, resolve
-from .status import EXIT_CODES, FAILED, CoreSectionFailed, Failure, overall_status
+from .status import EXIT_CODES, EXIT_INTERRUPTED, FAILED, PARTIAL, SUCCEEDED, CoreSectionFailed, Failure, overall_status
+from .store import DEFAULT_KEEP, Busy, Store, atomic_open, atomic_write_json
 
 
 class Run:
     def __init__(self, selection: Selection, base_url: str, client_id: str, secret: str, *,
-                 rate: float, reporter: Reporter,
+                 rate: float, reporter: Reporter, store: Store, keep: int = DEFAULT_KEEP,
+                 trigger: str = "manual", use_as_baseline: bool = False,
                  client_factory: Callable[..., FronteggClient] = FronteggClient) -> None:
         self.selection = selection
         self.reporter = reporter
+        self.store = store
+        self.keep = keep
+        self.trigger = trigger
+        self.use_as_baseline = use_as_baseline
+        self.run_id = ""
+        self.run_dir: Path | None = None
+        self.files: list[str] = []
         self.client = client_factory(base_url, client_id, secret, rate=rate)
         reporter.api_calls = lambda: self.client.calls
         self.base_url = self.client.base_url
@@ -52,13 +63,46 @@ class Run:
 
     # ---- driving ----------------------------------------------------------
     def execute(self) -> int:
+        try:
+            with self.store.lock():
+                return self._execute_locked()
+        except Busy as e:
+            self.reporter.error(str(e))
+            self.reporter.run_finished(FAILED, "Export not started", str(e), exitCode=EXIT_CODES[FAILED], busy=True)
+            return EXIT_CODES[FAILED]
+
+    def _execute_locked(self) -> int:
+        self.run_id, self.run_dir = self.store.create_run_dir(self.started_at)
+        log = RunLog(self.run_dir / "run.log")
+        self.reporter.set_log(log)
+        self.client.log = log
+        try:
+            return self._execute()
+        except KeyboardInterrupt:
+            self.failures.append(Failure("run", "Stopped before the export finished."))
+            self.status = FAILED
+            self._finish_failed(interrupted=True)
+            return EXIT_INTERRUPTED
+        except Exception as e:  # never leave a run without a summary
+            log("Unexpected error:\n" + traceback.format_exc(), "ERROR")
+            self.failures.append(Failure("run", f"Unexpected error: {e!r}",
+                                         hint="Run the export again. If it keeps happening, report it "
+                                              "with this run's run.log."))
+            self.status = FAILED
+            return self._finish_failed()
+        finally:
+            log.close()
+
+    def _execute(self) -> int:
         r = self.reporter
         sel = self.selection
         r.run_started(
             "Frontegg Data Export",
             f"started {self.started_at.isoformat(timespec='seconds')}  base={self.base_url}",
-            preset=sel.preset, sections=list(sel.sections), rate=self.rate, baseUrl=self.base_url)
+            runId=self.run_id, preset=sel.preset, sections=list(sel.sections), rate=self.rate,
+            baseUrl=self.base_url, outputDir=str(self.run_dir))
         r.info(f"Exporting: {sel.label} ({', '.join(sel.sections)})")
+        r.info(f"Saving to: {self.run_dir}")
         r.info("Read-only: this tool only reads from Frontegg and changes nothing there.")
         steps = [s for s in sel.steps if s != "write"]
         try:
@@ -156,7 +200,6 @@ class Run:
         return None
 
     def _write_outputs(self) -> None:
-        ended_at = datetime.now(timezone.utc)
         c = self.client
         output = {
             "schemaVersion": "1.0",
@@ -168,8 +211,6 @@ class Run:
                 "failedRoleLookupTenants": self.failed_role_tenants,
                 "failedHierarchyRoots": self.failed_roots,
                 "startedAt": self.started_at.isoformat(),
-                "endedAt": ended_at.isoformat(),
-                "durationSeconds": int((ended_at - self.started_at).total_seconds()),
                 "baseUrl": self.base_url,
                 "vendorId": self._vendor_id(),
                 "apiCalls": c.calls,
@@ -183,10 +224,60 @@ class Run:
             "counts": {k: len(v) for k, v in self.data.items()},
             **self.data,
         }
-        out_path = APP_DIR / f"frontegg_account_backup_{self.started_at.strftime('%Y%m%dT%H%M%SZ')}.json"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
-        self.reporter.step_done("write", f"Wrote {out_path.name} ({out_path.stat().st_size / 1_048_576:.1f} MB)")
+        self._write_json("snapshot.json", output)
+        size = (self.run_dir / "snapshot.json").stat().st_size / 1_048_576
+        self.reporter.step_done("write", f"Wrote snapshot.json ({size:.1f} MB)")
+
+    def _write_json(self, name: str, data: Any) -> None:
+        atomic_write_json(self.run_dir / name, data)
+        self.files.append(name)
+
+    # ---- summary, history, baseline, retention ----------------------------
+    def _summary(self, headline: str) -> dict:
+        ended_at = datetime.now(timezone.utc)
+        c = self.client
+        usable = self.status == SUCCEEDED or (self.status == PARTIAL and self.use_as_baseline)
+        return {
+            "app": {"name": "Frontegg Data Export", "version": __version__},
+            "runId": self.run_id,
+            "status": self.status,
+            "headline": headline,
+            "trigger": self.trigger,
+            "startedAt": self.started_at.isoformat(timespec="seconds"),
+            "endedAt": ended_at.isoformat(timespec="seconds"),
+            "durationSeconds": int((ended_at - self.started_at).total_seconds()),
+            "preset": self.selection.preset,
+            "presetLabel": self.selection.label,
+            "sections": list(self.selection.sections),
+            "rateLimitPerSecond": self.rate,
+            "baseUrl": self.base_url,
+            "apiCalls": c.calls,
+            "retries": c.retries,
+            "errors": c.errors,
+            "rateLimit429s": c.h429,
+            "rateLimitHeadersSeen": c.rate_limit_headers_seen,
+            "lastTraceId": c.last_trace_id,
+            "counts": {k: len(v) for k, v in self.data.items()} if self.status != FAILED else {},
+            "steps": self.step_stats,
+            "failures": [f.to_dict() for f in self.failures],
+            "warnings": self.reporter.warnings,
+            "files": sorted(set(self.files + ["summary.json", "run.log"])),
+            "usableAsBaseline": usable,
+        }
+
+    def _record(self, headline: str) -> dict:
+        summary = self._summary(headline)
+        atomic_write_json(self.run_dir / "summary.json", summary)
+        entry = {k: summary[k] for k in ("runId", "status", "trigger", "startedAt", "endedAt", "durationSeconds",
+                                          "preset", "presetLabel", "sections", "apiCalls", "counts",
+                                          "usableAsBaseline")}
+        self.store.record_run(entry, make_baseline=summary["usableAsBaseline"])
+        deleted, warnings = self.store.apply_retention(self.keep, protect={self.run_id})
+        if deleted:
+            self.reporter.info(f"Removed {len(deleted)} old run(s), keeping the last {self.keep}.")
+        for w in warnings:
+            self.reporter.warn(w)
+        return summary
 
     def _report_failures(self) -> None:
         for f in self.failures:
@@ -199,34 +290,44 @@ class Run:
     def _finish(self) -> int:
         c = self.client
         self._report_failures()
-        duration = int((datetime.now(timezone.utc) - self.started_at).total_seconds())
-        headline = "Export finished" if self.status != "partial" else "Export finished, but some data is missing"
+        headline = "Export finished" if self.status != PARTIAL else "Export finished, but some data is missing"
+        summary = self._record(headline)
+        if self.status == PARTIAL and not summary["usableAsBaseline"]:
+            self.reporter.info("This partial run won't be used as the comparison baseline for the next run.")
         self.reporter.run_finished(
             self.status, headline,
-            f"status={self.status}  duration={duration}s  api_calls={c.calls}  retries={c.retries}  "
-            f"errors={c.errors}  429s={c.h429}  rate_limit_headers_seen={c.rate_limit_headers_seen}",
-            exitCode=EXIT_CODES[self.status], failures=[f.to_dict() for f in self.failures])
+            f"status={self.status}  duration={summary['durationSeconds']}s  api_calls={c.calls}  "
+            f"retries={c.retries}  errors={c.errors}  429s={c.h429}  "
+            f"rate_limit_headers_seen={c.rate_limit_headers_seen}",
+            exitCode=EXIT_CODES[self.status], runId=self.run_id, outputDir=str(self.run_dir),
+            failures=[f.to_dict() for f in self.failures])
         return EXIT_CODES[self.status]
 
-    def _finish_failed(self) -> int:
+    def _finish_failed(self, interrupted: bool = False) -> int:
         for f in self.failures:
             trace = f" (trace ID {f.trace_id})" if f.trace_id else ""
             self.reporter.error(f"{f.section}: {f.message}{trace}", step=f.section, traceId=f.trace_id)
             if f.hint and f.section != "auth":
                 self.reporter.info(f"  What to do: {f.hint}")
-        duration = int((datetime.now(timezone.utc) - self.started_at).total_seconds())
-        self.reporter.run_finished(FAILED, "Export failed", f"status=failed  duration={duration}s  nothing was written",
-                                   exitCode=EXIT_CODES[FAILED], failures=[f.to_dict() for f in self.failures])
+        headline = "Export stopped" if interrupted else "Export failed"
+        self.files = []                     # a failed run keeps only its summary and log
+        summary = self._record(headline)
+        self.reporter.run_finished(FAILED, headline,
+                                   f"status=failed  duration={summary['durationSeconds']}s  "
+                                   "no export files were written",
+                                   exitCode=EXIT_CODES[FAILED], runId=self.run_id, outputDir=str(self.run_dir),
+                                   failures=[f.to_dict() for f in self.failures])
         return EXIT_CODES[FAILED]
 
 
 def main(rate: str | float | None = None, preset: str | None = None, sections: list[str] | None = None,
-         roles: bool | None = None, progress: str = "console") -> int:
+         roles: bool | None = None, progress: str = "console", out_dir: str | Path | None = None,
+         keep: int = DEFAULT_KEEP, trigger: str = "manual", use_as_baseline: bool = False) -> int:
     env = load_config(DOTENV_PATH)
     selection = resolve(preset, sections, roles=roles)
-    reporter = Reporter(progress, log=_log)
-    reporter.info(f"Output dir: {APP_DIR}")
-    reporter.info(f"Log file  : {LOG_PATH.name}")
+    reporter = Reporter(progress)
+    store = Store(Path(out_dir) if out_dir else default_output_dir())
     run = Run(selection, env["FRONTEGG_BASE_URL"], env["FRONTEGG_CLIENT_ID"], env["FRONTEGG_CLIENT_SECRET"],
-              rate=parse_rate(rate), reporter=reporter, client_factory=FronteggClient)
+              rate=parse_rate(rate), reporter=reporter, store=store, keep=keep, trigger=trigger,
+              use_as_baseline=use_as_baseline, client_factory=FronteggClient)
     return run.execute()

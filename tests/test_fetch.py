@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
-from unittest import mock
 
-from frontegg_data_export import fetch, logs
+from frontegg_data_export import fetch
 from frontegg_data_export.client import ApiError, FronteggClient
 from frontegg_data_export.progress import Reporter
 from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg, make_dataset
@@ -24,24 +21,10 @@ class FetchTests(unittest.TestCase):
         cls.mock.stop()
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        patches = [
-            mock.patch.object(logs, "LOG_PATH", Path(self.tmp.name) / "export.log"),
-            mock.patch.object(logs, "_log_fp", None),
-        ]
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
-        self.addCleanup(self._close_log)
         self.mock.requests.clear()
         self.client = FronteggClient(self.mock.url, CLIENT_ID, CLIENT_SECRET, sleep=lambda s: None)
         self.report = Reporter("quiet")
         self.client.authenticate()
-
-    def _close_log(self):
-        if logs._log_fp:
-            logs._log_fp.close()
-        self.tmp.cleanup()
 
     def test_users_page_index_offset(self):
         users = fetch.pull_pages_by_pageindex(self.client, fetch.USERS_PATH, 200, "users", self.report, "users")
