@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, csvout
 from .client import ApiError, AuthError, FronteggClient
 from .config import DOTENV_PATH, default_output_dir, load_config, parse_rate
 from .fetch import (
@@ -41,6 +41,7 @@ class Run:
     def __init__(self, selection: Selection, base_url: str, client_id: str, secret: str, *,
                  rate: float, reporter: Reporter, store: Store, keep: int = DEFAULT_KEEP,
                  trigger: str = "manual", use_as_baseline: bool = False,
+                 formats: tuple[str, ...] = ("csv", "json"),
                  client_factory: Callable[..., FronteggClient] = FronteggClient) -> None:
         self.selection = selection
         self.reporter = reporter
@@ -51,6 +52,9 @@ class Run:
         self.run_id = ""
         self.run_dir: Path | None = None
         self.files: list[str] = []
+        self.formats = tuple(formats)
+        self.rows: dict[str, int] = {}
+        self.notes: list[str] = []
         self.client = client_factory(base_url, client_id, secret, rate=rate)
         reporter.api_calls = lambda: self.client.calls
         self.base_url = self.client.base_url
@@ -245,13 +249,25 @@ class Run:
     def _write_outputs(self) -> None:
         self.model = build_model(self.data, sections=self.selection.sections, run_started_at=self.started_at,
                                  failed_role_tenants=self.failed_role_tenants, failed_roots=self.failed_roots)
-        snapshot = build_snapshot(self._run_meta(), self._section_status(),
-                                  [f.to_dict() for f in self.failures], self.data, self.failed_role_tenants)
-        self._write_json("snapshot.json", snapshot)
         atomic_write_json(self.run_dir / "normalized.json", self.model, indent=None)
         self.files.append("normalized.json")
-        size = (self.run_dir / "snapshot.json").stat().st_size / 1_048_576
-        self.reporter.step_done("write", f"Wrote snapshot.json ({size:.1f} MB)")
+        if "csv" in self.formats:
+            self.rows = csvout.write_all(self.run_dir, self.model, self.selection.sections)
+            self.files.extend(self.rows)
+            self.reporter.step_done("write", "Wrote " + ", ".join(f"{n} ({r} rows)" for n, r in self.rows.items()))
+        if "json" in self.formats:
+            snapshot = build_snapshot(self._run_meta(), self._section_status(),
+                                      [f.to_dict() for f in self.failures], self.data, self.failed_role_tenants)
+            self._write_json("snapshot.json", snapshot)
+            size = (self.run_dir / "snapshot.json").stat().st_size / 1_048_576
+            self.reporter.step_done("write", f"Wrote snapshot.json ({size:.1f} MB)")
+        rule_plans = sorted(p["name"] for p in self.model["plans"].values() if p["usesRules"])
+        if rule_plans and self.selection.has("plans"):
+            note = (f"{len(rule_plans)} plan(s) can also grant access through targeting rules or a default "
+                    f"treatment ({', '.join(rule_plans[:5])}{', ...' if len(rule_plans) > 5 else ''}). That access "
+                    "has no assignment record, so those users may appear in users_without_plan.csv.")
+            self.notes.append(note)
+            self.reporter.info(note)
 
     def _write_json(self, name: str, data: Any) -> None:
         atomic_write_json(self.run_dir / name, data)
@@ -287,6 +303,8 @@ class Run:
             "steps": self.step_stats,
             "failures": [f.to_dict() for f in self.failures],
             "warnings": self.reporter.warnings,
+            "notes": self.notes,
+            "rows": self.rows,
             "files": sorted(set(self.files + ["summary.json", "run.log"])),
             "usableAsBaseline": usable,
         }
@@ -348,12 +366,13 @@ class Run:
 
 def main(rate: str | float | None = None, preset: str | None = None, sections: list[str] | None = None,
          roles: bool | None = None, progress: str = "console", out_dir: str | Path | None = None,
-         keep: int = DEFAULT_KEEP, trigger: str = "manual", use_as_baseline: bool = False) -> int:
+         keep: int = DEFAULT_KEEP, trigger: str = "manual", use_as_baseline: bool = False,
+         formats: tuple[str, ...] = ("csv", "json")) -> int:
     env = load_config(DOTENV_PATH)
     selection = resolve(preset, sections, roles=roles)
     reporter = Reporter(progress)
     store = Store(Path(out_dir) if out_dir else default_output_dir())
     run = Run(selection, env["FRONTEGG_BASE_URL"], env["FRONTEGG_CLIENT_ID"], env["FRONTEGG_CLIENT_SECRET"],
               rate=parse_rate(rate), reporter=reporter, store=store, keep=keep, trigger=trigger,
-              use_as_baseline=use_as_baseline, client_factory=FronteggClient)
+              use_as_baseline=use_as_baseline, formats=formats, client_factory=FronteggClient)
     return run.execute()
