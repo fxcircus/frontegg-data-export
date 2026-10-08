@@ -6,23 +6,39 @@ A read-only export of a Frontegg environment to spreadsheet-friendly CSV files a
 - **No dependencies.** It needs Python 3.10 or later and nothing else: no `pip install`, no build step, and it works offline apart from the Frontegg API itself.
 - **For people and for pipelines.** It writes CSVs (UTF-8, Excel-safe) for people and a versioned JSON snapshot for scripts and diffs.
 
-> **Status:** phase 1 of the build (the core and the command line). The local browser app, scheduling and secret storage are in progress. Full documentation comes with phase 4.
+> This release is a command-line tool. A double-click desktop version with a browser-based Setup page and built-in scheduling is planned. Until then, schedule runs with cron, Task Scheduler or CI.
 
 Frontegg Data Export grew out of two earlier single-file scripts, [frontegg-account-backup](https://github.com/fxcircus/frontegg-account-backup) and [frontegg-user-export](https://github.com/fxcircus/frontegg-user-export). The **Users only** preset replaces the users-only script.
 
-## Quick start (command line)
+## Quick start
+
+**1. Get it.** Clone the repo, or download it from GitHub (**Code → Download ZIP**) and unzip it:
 
 ```bash
-export FRONTEGG_BASE_URL=https://api.frontegg.com      # or .us / .ca / .au, see Regions
-export FRONTEGG_CLIENT_ID=...
-export FRONTEGG_CLIENT_SECRET=...                      # the environment's API key
-
-python3 -m frontegg_data_export test-connection
-python3 -m frontegg_data_export estimate --probe
-python3 -m frontegg_data_export run
+git clone https://github.com/fxcircus/frontegg-data-export.git
+cd frontegg-data-export
+python3 --version          # must be 3.10 or later; get it from https://www.python.org/downloads/
 ```
 
-You can put the same three values in a `.env` file next to the app instead (see `.env.example`), or point `FDE_DOTENV` at another file. Environment variables win over `.env`.
+**2. Add your credentials.** Copy the template and fill in the three values (see [Where to find the credentials](#where-to-find-the-credentials) and [Regions](#regions)):
+
+```bash
+cp .env.example .env
+chmod 600 .env             # readable only by you
+nano .env                  # set FRONTEGG_BASE_URL, FRONTEGG_CLIENT_ID and FRONTEGG_CLIENT_SECRET (the API key)
+```
+
+`.env` is ignored by git. Instead of the file, you can set the same three environment variables (they win over `.env`), or point `FDE_DOTENV` at another file.
+
+**3. Check, estimate, run:**
+
+```bash
+python3 -m frontegg_data_export test-connection     # gets a token and reads the user count
+python3 -m frontegg_data_export estimate --probe    # API calls and time, before you run
+python3 -m frontegg_data_export run                 # writes to ./exports/runs/<date>/
+```
+
+Each run prints its status and exits with 0 (succeeded), 2 (partial) or 1 (failed). Open the CSVs in Excel, Numbers or Google Sheets. Run `python3 -m frontegg_data_export run --help` for every option.
 
 ### Where to find the credentials
 
@@ -176,6 +192,16 @@ python3 -m frontegg_data_export test-connection [--json]
 
 `RUN` is a run ID, a run folder, or one of `latest`, `previous` or `baseline`.
 
+### Running on a schedule
+
+`run --quiet` prints one result line and exits 0, 2 or 1, so it fits cron, Task Scheduler or CI. The credentials come from `.env` (or environment variables). A daily run at 06:00 with cron (macOS or Linux, `crontab -e`):
+
+```
+0 6 * * * cd /path/to/frontegg-data-export && /usr/local/bin/python3 -m frontegg_data_export run --quiet >> exports/cron.log 2>&1
+```
+
+Use the full path to your Python (`which python3`), because cron doesn't load your shell's PATH. The computer must be on at that time.
+
 ## Rate limits and speed
 
 Frontegg documents these [rate limits](https://developers.frontegg.com/ciam/guides/env-settings/rate-limits):
@@ -255,6 +281,10 @@ Several Frontegg API behaviours don't match the public docs cleanly. Each is han
 - The API key gives full management access to the environment. Frontegg's docs describe the token as having access to all resources in your Frontegg environment. This tool only reads, but store the key carefully and rotate it if it leaks.
 - The key and access tokens are never written to logs, outputs or the console. Every log line passes through a redactor, and a test checks the whole output folder for a known fake key.
 - Exports contain personal data (names, emails, login history). Keep the output folder somewhere access-controlled, and use retention (`--keep`).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Development
 
