@@ -60,7 +60,6 @@ def run_export(m: MockFrontegg, out_dir: str | Path, secret: str = CLIENT_SECRET
            "FDE_HOME": str(Path(out_dir) / ".fde-home")}
     out, errs = io.StringIO(), io.StringIO()
     with mock.patch.dict(os.environ, env), \
-            mock.patch.object(runner, "DOTENV_PATH", Path(out_dir) / ".env-absent"), \
             mock.patch.object(runner, "FronteggClient", fast_client), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(errs):
         code = runner.main(out_dir=out_dir, **kwargs)
@@ -81,6 +80,7 @@ def cli(args: list[str], m: MockFrontegg | None, home: str | Path, secret: str =
     """Run the real CLI in a subprocess, pointed at the mock."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FRONTEGG_", "FDE_"))}
     env["FDE_HOME"] = str(Path(home) / ".fde-home")
+    env["FDE_DOTENV"] = str(Path(home) / "no-such.env")      # never a developer's real .env
     env["PYTHONIOENCODING"] = "utf-8"
     if m is not None:
         env.update({"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": secret, "FRONTEGG_BASE_URL": m.url})

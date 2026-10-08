@@ -24,6 +24,21 @@ class CliTests(unittest.TestCase):
             r = cli(["frobnicate"], None, tmp)
             self.assertEqual(r.returncode, 64)
 
+    def test_tests_never_see_a_real_dotenv(self):
+        import os
+        from frontegg_data_export.config import dotenv_path
+        self.assertFalse(dotenv_path().exists())
+        self.assertFalse([k for k in os.environ if k.startswith("FRONTEGG_")])
+
+    def test_dotenv_location_can_be_overridden(self):
+        with MockFrontegg(small()) as m, temp_dir() as tmp:
+            env_file = Path(tmp) / "custom.env"
+            env_file.write_text(f"FRONTEGG_BASE_URL={m.url}\nFRONTEGG_CLIENT_ID=mock-client-id\n"
+                                "FRONTEGG_CLIENT_SECRET=mock-client-secret\n", encoding="utf-8")
+            r = cli(["test-connection"], None, tmp, extra_env={"FDE_DOTENV": str(env_file)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(m.calls_to("/auth/vendor/")), 1)
+
     def test_missing_credentials_explains_where_to_find_them(self):
         with temp_dir() as tmp:
             r = cli(["run", "--out", tmp], None, tmp)

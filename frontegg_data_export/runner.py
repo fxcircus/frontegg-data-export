@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from . import __version__, csvout
 from .client import ApiError, AuthError, FronteggClient
-from .config import DOTENV_PATH, ConfigError, Credentials, load_credentials, load_settings, output_dir, parse_rate
+from .config import ConfigError, Credentials, load_credentials, load_settings, output_dir, parse_rate
 from .diff import CHANGES_HEADER, diff_models, first_run_summary, summary_lines
 from .fetch import (
     PAGE_SIZE_TENANTS,
@@ -457,7 +457,7 @@ def main(*, preset: str | None = None, sections: list[str] | None = None, roles:
     reporter = Reporter(progress)
     try:
         settings = load_settings()
-        creds = credentials or load_credentials(dotenv=DOTENV_PATH, settings=settings)
+        creds = credentials or load_credentials(settings=settings)
         selection = resolve(None if sections else (preset or settings["preset"]), sections,
                             roles=settings["roles"] if roles is None else roles,
                             login_events=(settings["loginEvents"] if (login_events is None and not sections)

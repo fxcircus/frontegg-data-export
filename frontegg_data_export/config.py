@@ -2,7 +2,8 @@
 
 Credentials are resolved field by field, first match wins:
   1. environment variables FRONTEGG_BASE_URL / FRONTEGG_CLIENT_ID / FRONTEGG_CLIENT_SECRET
-  2. a `.env` file next to the app (for engineers; the app never creates one)
+  2. a `.env` file next to the app, or the file $FDE_DOTENV names (for
+     engineers; the app never creates one)
   3. the stored setup: settings.json for the region and Client ID, and the
      OS credential store (or a private file) for the API key.
 
@@ -19,7 +20,11 @@ from pathlib import Path
 from typing import Callable
 
 APP_DIR = Path(__file__).resolve().parent.parent
-DOTENV_PATH = APP_DIR / ".env"
+
+
+def dotenv_path() -> Path:
+    """`.env` next to the app, or the file named by $FDE_DOTENV."""
+    return Path(os.environ.get("FDE_DOTENV") or APP_DIR / ".env").expanduser()
 
 ENV_BASE_URL, ENV_CLIENT_ID, ENV_SECRET = "FRONTEGG_BASE_URL", "FRONTEGG_CLIENT_ID", "FRONTEGG_CLIENT_SECRET"
 
@@ -162,13 +167,13 @@ class Credentials:
     sources: dict[str, str] = field(default_factory=dict)
 
 
-def load_credentials(*, dotenv: Path = DOTENV_PATH, settings: dict | None = None,
+def load_credentials(*, dotenv: Path | None = None, settings: dict | None = None,
                      secret_lookup: Callable[[], str | None] | None = None,
                      require_secret: bool = True) -> Credentials:
     from .client import validate_base_url
 
     s = settings if settings is not None else load_settings()
-    dot = read_dotenv(dotenv)
+    dot = read_dotenv(dotenv if dotenv is not None else dotenv_path())
     sources: dict[str, str] = {}
 
     def pick(env_key: str, stored: Callable[[], str | None], name: str) -> str:
