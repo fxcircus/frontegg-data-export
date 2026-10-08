@@ -17,7 +17,7 @@ git clone https://github.com/fxcircus/frontegg-account-backup.git
 cd frontegg-account-backup
 cp .env.example .env
 # edit .env and fill in your FRONTEGG_CLIENT_ID, FRONTEGG_CLIENT_SECRET, FRONTEGG_BASE_URL
-python3 export.py
+python3 -m frontegg_data_export
 ```
 
 That's it. The script prints clear per-step progress and writes:
@@ -162,7 +162,7 @@ Several Frontegg API behaviours don't match the public docs cleanly. These are e
 - This script issues only `GET` requests, plus a single `POST /auth/vendor/` to mint the token. It NEVER creates, updates, or deletes any Frontegg resource.
 - The vendor token is held in memory only — never written to disk.
 - `.env` is excluded from version control via the shipped `.gitignore`.
-- Output files are written only into the script's directory.
+- Output files are written only into the app directory.
 
 ## Troubleshooting
 
