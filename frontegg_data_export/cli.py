@@ -5,25 +5,20 @@ from __future__ import annotations
 import sys
 
 from . import runner
-from .client import ApiError
 from .logs import _log
-from .progress import err
+from .status import EXIT_INTERRUPTED
 
 
 def main() -> int:
     try:
         return runner.main()
     except KeyboardInterrupt:
-        err("Aborted by user (KeyboardInterrupt)")
-        return 130
+        print("Stopped before the export finished (Ctrl-C).", file=sys.stderr)
+        return EXIT_INTERRUPTED
     except SystemExit:
         raise
-    except ApiError as exc:
-        err(exc.message)
-        _log(f"Fatal: {exc.message} (HTTP {exc.status}, path={exc.path}, trace={exc.trace_id})", "ERROR")
-        return 1
     except Exception as exc:
-        err(f"Fatal: {exc!r}")
+        print(f"Fatal: {exc!r}", file=sys.stderr)
         _log(f"Fatal: {exc!r}", "ERROR")
         return 1
 

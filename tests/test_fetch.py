@@ -9,6 +9,7 @@ from unittest import mock
 
 from frontegg_data_export import fetch, logs
 from frontegg_data_export.client import ApiError, FronteggClient
+from frontegg_data_export.progress import Reporter
 from tests.mock_frontegg import CLIENT_ID, CLIENT_SECRET, MockFrontegg, make_dataset
 
 
@@ -34,6 +35,7 @@ class FetchTests(unittest.TestCase):
         self.addCleanup(self._close_log)
         self.mock.requests.clear()
         self.client = FronteggClient(self.mock.url, CLIENT_ID, CLIENT_SECRET, sleep=lambda s: None)
+        self.report = Reporter("quiet")
         self.client.authenticate()
 
     def _close_log(self):
@@ -42,29 +44,35 @@ class FetchTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_users_page_index_offset(self):
-        users = fetch.pull_pages_by_pageindex(self.client, "/identity/resources/users/v3", 200, "users")
+        users = fetch.pull_pages_by_pageindex(self.client, fetch.USERS_PATH, 200, "users", self.report, "users")
         self.assertEqual(len(users), len(self.ds.users))
         self.assertGreater(len(self.ds.users), 200, "dataset must span more than one page")
         offsets = [r["query"]["_offset"][0] for r in self.mock.calls_to("/identity/resources/users/v3")]
         self.assertEqual(offsets[:2], ["0", "1"])
 
     def test_tenants_page_index_offset(self):
-        tenants = fetch.pull_pages_by_pageindex(self.client, "/tenants/resources/tenants/v2", 200, "tenants")
+        tenants = fetch.pull_pages_by_pageindex(self.client, fetch.TENANTS_PATH, 200, "accounts", self.report, "a")
         self.assertEqual({t["tenantId"] for t in tenants}, {t["tenantId"] for t in self.ds.tenants})
 
     def test_enriched_plans_return_more_than_ten(self):
-        plans = fetch.pull_paginated_limit_offset(
-            self.client, "/entitlements/resources/plans/v1/enriched", limit=200, label="plans")
+        plans = fetch.pull_plans(self.client)
         self.assertEqual(len(plans), 12)
         self.assertIn("assignedTenantsCount", plans[0])
 
     def test_features_limit_100(self):
-        features = fetch.pull_paginated_limit_offset(
-            self.client, "/entitlements/resources/features/v1", limit=100, label="features")
+        features = fetch.pull_features(self.client)
         self.assertEqual(len(features), len(self.ds.features))
 
+    def test_feature_flags(self):
+        self.assertEqual(len(fetch.pull_feature_flags(self.client)), len(self.ds.feature_flags))
+
+    def test_entitlements_stop_on_has_next_false(self):
+        fetch.pull_entitlements(self.client, self.report)
+        calls = len(self.mock.calls_to(fetch.ENTITLEMENTS_PATH))
+        self.assertEqual(calls, -(-len(self.ds.entitlements) // 10))   # no extra empty page
+
     def test_entitlements_paged_by_ten(self):
-        ents = fetch.pull_entitlements(self.client)
+        ents = fetch.pull_entitlements(self.client, self.report)
         self.assertEqual(len(ents), len(self.ds.entitlements))
         self.assertGreater(len(ents), 10)
         limits = {r["query"]["limit"][0] for r in self.mock.calls_to("/entitlements/resources/entitlements/v2")}
@@ -72,13 +80,13 @@ class FetchTests(unittest.TestCase):
 
     def test_hierarchy_one_call_per_reseller_with_tenant_header(self):
         tenants = list(self.ds.tenants)
-        trees, failed = fetch.pull_hierarchy(self.client, tenants, [])
+        trees, failed = fetch.pull_hierarchy(self.client, tenants, [], self.report)
         self.assertEqual(failed, [])
         resellers = [t["tenantId"] for t in tenants if t["isReseller"]]
         self.assertEqual([t["tenantId"] for t in trees], resellers)
         calls = self.mock.calls_to("/tenants/resources/hierarchy/v1/tree")
         self.assertEqual([c["tenant"] for c in calls], resellers)
-        walked = {n["tenantId"] for tree in trees for n in fetch._walk_tree(tree)}
+        walked = {n["tenantId"] for tree in trees for n in fetch.walk_tree(tree)}
         self.assertEqual(len(walked), 7)   # 2 roots + 5 descendants
 
     # ---- the mock itself reproduces the quirks --------------------------
@@ -112,7 +120,7 @@ class FetchTests(unittest.TestCase):
 
     def test_role_lookups_batched_per_tenant_in_chunks_of_100(self):
         users = list(self.ds.users)
-        assignments, failed = fetch.pull_user_role_assignments(self.client, users, [])
+        assignments, failed = fetch.pull_user_role_assignments(self.client, users, [], self.report)
         self.assertEqual(failed, [])
         self.assertEqual(len(assignments), len(self.ds.role_assignments))
         big = next(t["tenantId"] for t in self.ds.tenants if t["name"] == "Acme Big")
