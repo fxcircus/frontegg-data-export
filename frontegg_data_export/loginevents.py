@@ -15,7 +15,8 @@ What Frontegg documents (developers.frontegg.com, audits API):
   raw action is kept in the CSV so the classification can be checked.
   Observed in a real environment's audit log: successful logins are
   "User logged in" (and "Impersonated by <email> - User logged in"); rows
-  carry the user's ID as `actorId`. No failed-login rows were seen over 30
+  carry `actorId`, which for an impersonated login is the impersonator, so
+  user_id is resolved from the row's email first. No failed-login rows were seen over 30
   days, so the failure wording (or whether failures are audited at all) is
   still unconfirmed.
 - Audit logs are listed as an Enterprise feature. When the API refuses
@@ -93,8 +94,11 @@ def event_rows(events: list[dict], model: dict) -> Iterable[list[Any]]:
     for e in events:
         user = e.get("user")
         email = _first(e, "email", "userEmail") or (user if isinstance(user, str) and "@" in user else None) or ""
-        uid = (_first(e, "userId", "actorId", "frontegg_user_id")
-               or (by_email.get(email.casefold()) if email else None) or "")
+        # The person logged in is the one in `email`. `actorId` is whoever acted:
+        # for an impersonated login that's the impersonator, not this user.
+        uid = (_first(e, "userId", "frontegg_user_id")
+               or (by_email.get(email.casefold()) if email else None)
+               or _first(e, "actorId") or "")
         if not email and uid:
             email = (model.get("users", {}).get(uid) or {}).get("email", "")
         tid = _first(e, "tenantId", "tenant_id") or ""

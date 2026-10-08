@@ -72,7 +72,9 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual({row["result"] for row in rows}, {"success", "failure"})
             sample = rows[0]
             self.assertTrue(sample["user_email"].endswith("@example.com"))
-            self.assertTrue(all(row["user_id"] for row in rows), "user_id comes from the audit row's actorId")
+            by_email = {u["email"]: u["id"] for u in ds.users}
+            self.assertTrue(all(row["user_id"] == by_email[row["user_email"]] for row in rows),
+                            "user_id is the user logged into, even for impersonated logins")
             self.assertIn(IMPERSONATED_LOGIN_ACTION, {row["action"] for row in rows})
             self.assertTrue(sample["account_name"].startswith("Acme"))
             self.assertTrue(sample["ip"].startswith("203.0.113."))

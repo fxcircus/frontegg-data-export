@@ -252,7 +252,8 @@ def make_dataset(seed: int = 7, tenants: int = 12, big_tenant_users: int = 230,
     for u in ds.users[:2]:
         if u["tenantIds"]:
             ds.audits.append({"frontegg_id": ds.uid(), "tenantId": u["tenantIds"][0], "vendorId": ds.vendor_id,
-                              "environmentName": "Development", "actorId": u["id"], "email": u["email"],
+                              # actorId is the impersonator; email is the user logged into
+                              "environmentName": "Development", "actorId": ds.uid(), "email": u["email"],
                               "action": IMPERSONATED_LOGIN_ACTION, "severity": "Info", "ip": "", "userAgent": "",
                               "description": IMPERSONATED_LOGIN_ACTION,
                               "createdAt": iso(now - timedelta(days=rng.randint(0, 20)))})
