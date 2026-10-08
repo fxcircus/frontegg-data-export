@@ -1,4 +1,11 @@
-"""HTTP client with throttling, retries, re-auth, rate-limit accounting."""
+"""The only module that talks to Frontegg.
+
+Read-only is enforced here, not by convention: every request goes through
+`FronteggClient._send()`, which refuses anything other than `GET` or the
+single `POST /auth/vendor/` that mints the token, before any network I/O.
+Redirects are not followed, so a 3xx can't replay the token or the POST
+somewhere else.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +19,46 @@ from typing import Any
 from .logs import _log
 
 HTTP_TIMEOUT = 30
+AUTH_PATH = "/auth/vendor/"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+class ReadOnlyViolation(RuntimeError):
+    """Raised before any I/O when code tries to send a non-read request."""
+
+
+def check_request_allowed(method: str, path: str) -> None:
+    if method == "GET":
+        return
+    if method == "POST" and path == AUTH_PATH:
+        return
+    raise ReadOnlyViolation(
+        f"Refusing {method} {path}: this tool only reads from Frontegg "
+        f"(GET, plus POST {AUTH_PATH} to get a token).")
+
+
+def validate_base_url(url: str) -> str:
+    """Accept https:// anywhere, or http:// only on this machine (the mock)."""
+    parts = urllib.parse.urlsplit((url or "").strip())
+    host = parts.hostname or ""
+    if parts.query or parts.fragment or not host:
+        raise ValueError(f"Not a valid API base URL: {url!r}")
+    if parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK_HOSTS):
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+    raise ValueError(f"The API base URL must start with https:// (got {url!r})")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None   # urllib then raises HTTPError for the 3xx
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class FronteggClient:
     def __init__(self, base_url: str, client_id: str, secret: str) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_base_url(base_url)
         self.client_id = client_id
         self.secret = secret
         self.token: str | None = None
@@ -28,18 +70,22 @@ class FronteggClient:
         self.rate_limit_headers_seen = 0
         self.last_trace_id = ""
 
+    # ---- the single choke point -----------------------------------------
+    def _send(self, method: str, path: str, *, params: dict | None = None,
+              body: bytes | None = None, headers: dict | None = None):
+        check_request_allowed(method, path)
+        url = self.base_url + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params, doseq=True)
+        req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+        return _OPENER.open(req, timeout=HTTP_TIMEOUT)
+
     def authenticate(self) -> None:
-        url = f"{self.base_url}/auth/vendor/"
         body = json.dumps({"clientId": self.client_id, "secret": self.secret}).encode()
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with self._send("POST", AUTH_PATH, body=body,
+                            headers={"Content-Type": "application/json", "Accept": "application/json"}) as resp:
                 payload = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             raise SystemExit(f"Vendor authentication failed: HTTP {e.code} — {e.read()[:300]!r}")
@@ -68,10 +114,9 @@ class FronteggClient:
         }
         if tenant_id is not None:
             headers["frontegg-tenant-id"] = tenant_id
-        req = urllib.request.Request(url, headers=headers, method=method)
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with self._send(method, path, params=params, headers=headers) as resp:
                 raw = resp.read()
                 self.calls += 1
                 elapsed = time.time() - t0
