@@ -11,11 +11,13 @@ from typing import Any, Callable
 
 from . import __version__, csvout
 from .client import ApiError, AuthError, FronteggClient
-from .config import DOTENV_PATH, default_output_dir, load_config, parse_rate
+from .config import DOTENV_PATH, ConfigError, Credentials, load_credentials, load_settings, output_dir, parse_rate
+from .diff import CHANGES_HEADER, diff_models, first_run_summary, summary_lines
 from .fetch import (
     PAGE_SIZE_TENANTS,
     PAGE_SIZE_USERS,
     PERMISSIONS_PATH,
+    PLANS_PATH,
     ROLES_PATH,
     TENANTS_PATH,
     USERS_PATH,
@@ -28,11 +30,10 @@ from .fetch import (
     pull_user_role_assignments,
     walk_tree,
 )
-from .diff import CHANGES_HEADER, diff_models, first_run_summary
 from .logs import RunLog
 from .model import build_model
 from .progress import Reporter
-from .sections import STEP_LABELS, Selection, resolve
+from .sections import STEP_LABELS, Counts, Estimate, Selection, estimate, resolve
 from .status import EXIT_CODES, EXIT_INTERRUPTED, FAILED, PARTIAL, SUCCEEDED, CoreSectionFailed, Failure, overall_status
 from .snapshot import build_snapshot, counts_for
 from .store import DEFAULT_KEEP, Busy, Store, atomic_write_json, read_json
@@ -290,12 +291,9 @@ class Run:
         if baseline_id is None:
             self.reporter.info(summary["message"])
         else:
-            c = summary["counts"]
-            self.reporter.info(
-                f"Compared with {baseline_id}: {summary['total']} change(s). Users +{c['usersAdded']} "
-                f"-{c['usersRemoved']} ~{c['usersChanged']}, accounts +{c['accountsAdded']} -{c['accountsRemoved']}, "
-                f"plan assignments +{c['planAssignmentsAdded']} -{c['planAssignmentsRemoved']}. "
-                f"{summary['usersLoggedInSince']} user(s) logged in since then.")
+            self.reporter.info(f"Compared with {baseline_id}: {summary['total']} change(s).")
+            for line in summary_lines(summary):
+                self.reporter.info("  " + line)
             for note in summary["notCompared"]:
                 self.reporter.info(f"  Not compared: {note}")
 
@@ -395,15 +393,98 @@ class Run:
         return EXIT_CODES[FAILED]
 
 
-def main(rate: str | float | None = None, preset: str | None = None, sections: list[str] | None = None,
-         roles: bool | None = None, progress: str = "console", out_dir: str | Path | None = None,
-         keep: int = DEFAULT_KEEP, trigger: str = "manual", use_as_baseline: bool = False,
-         formats: tuple[str, ...] = ("csv", "json")) -> int:
-    env = load_config(DOTENV_PATH)
-    selection = resolve(preset, sections, roles=roles)
+def main(*, preset: str | None = None, sections: list[str] | None = None, roles: bool | None = None,
+         rate: str | float | None = None, progress: str = "console", out_dir: str | Path | None = None,
+         keep: int | None = None, trigger: str = "manual", use_as_baseline: bool = False,
+         formats: tuple[str, ...] = ("csv", "json"), credentials: Credentials | None = None) -> int:
+    """Run one export. Options left as None come from settings.json."""
     reporter = Reporter(progress)
-    store = Store(Path(out_dir) if out_dir else default_output_dir())
-    run = Run(selection, env["FRONTEGG_BASE_URL"], env["FRONTEGG_CLIENT_ID"], env["FRONTEGG_CLIENT_SECRET"],
-              rate=parse_rate(rate), reporter=reporter, store=store, keep=keep, trigger=trigger,
+    try:
+        settings = load_settings()
+        creds = credentials or load_credentials(dotenv=DOTENV_PATH, settings=settings)
+        selection = resolve(None if sections else (preset or settings["preset"]), sections,
+                            roles=settings["roles"] if roles is None else roles)
+        rate_value = parse_rate(rate if rate is not None else settings["rate"])
+    except (ConfigError, ValueError) as e:
+        reporter.error(str(e))
+        return EXIT_CODES[FAILED]
+    store = Store(output_dir(out_dir, settings))
+    run = Run(selection, creds.base_url, creds.client_id, creds.secret,
+              rate=rate_value, reporter=reporter, store=store,
+              keep=int(keep if keep is not None else settings["keepRuns"]), trigger=trigger,
               use_as_baseline=use_as_baseline, formats=formats, client_factory=FronteggClient)
     return run.execute()
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers for the CLI and the local app
+# --------------------------------------------------------------------------- #
+def _counts_from_summary(summary: dict) -> Counts:
+    c = summary.get("counts") or {}
+    steps = summary.get("steps") or {}
+    return Counts(users=c.get("users"), accounts=c.get("accounts"), entitlements=c.get("planAssignments"),
+                  resellers=c.get("resellerAccounts"), plans=c.get("plans"), features=c.get("features"),
+                  accounts_with_users=(steps.get("roles") or {}).get("calls"))
+
+
+def probe_counts(client: FronteggClient) -> Counts:
+    """Three cheap reads that size an environment before its first export."""
+    users = client.get(USERS_PATH, {"_limit": 1, "_offset": 0}) or {}
+    tenants = client.get(TENANTS_PATH, {"_limit": 1, "_offset": 0}) or {}
+    resp = client.get(PLANS_PATH, {"limit": 200, "offset": 0}) or {}
+    plans = resp.get("items", []) if isinstance(resp, dict) else []
+    return Counts(
+        users=((users.get("_metadata") or {}).get("totalItems")),
+        accounts=((tenants.get("_metadata") or {}).get("totalItems")),
+        entitlements=sum(int(p.get("assignedTenantsCount") or 0) + int(p.get("assignedUsersCount") or 0)
+                         for p in plans),
+        plans=len(plans))
+
+
+def estimate_for(selection: Selection, rate: float, store: Store, *, probe: bool = False,
+                 credentials: Credentials | None = None) -> Estimate:
+    """From the last completed run when there is one; otherwise from record
+    counts (cached from an earlier probe, or probed now if allowed)."""
+    history = store.load_history()
+    done = [r for r in history["runs"] if r.get("status") != FAILED]
+    prev_steps, pace, counts = None, None, None
+    if done:
+        last = read_json(store.run_dir(done[-1]["runId"]) / "summary.json") or {}
+        prev_steps = last.get("steps")
+        if last.get("durationSeconds") and last.get("apiCalls"):
+            pace = max(0.5, last["apiCalls"] / max(1, last["durationSeconds"]))
+        counts = _counts_from_summary(last)
+    elif history.get("probe"):
+        counts = Counts(**history["probe"]["counts"])
+    elif probe and credentials:
+        client = FronteggClient(credentials.base_url, credentials.client_id, credentials.secret, rate=rate)
+        client.authenticate()
+        counts = probe_counts(client)
+        history["probe"] = {"counts": counts.__dict__, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        store.save_history(history)
+    return estimate(selection, rate, counts, previous_steps=prev_steps, previous_pace=pace)
+
+
+def test_connection(credentials: Credentials,
+                    client_factory: Callable[..., FronteggClient] = FronteggClient) -> dict:
+    """Get a token, then make one cheap read. Returns a plain-language result."""
+    client = client_factory(credentials.base_url, credentials.client_id, credentials.secret, rate=4.0)
+    try:
+        client.authenticate()
+    except AuthError as e:
+        return {"ok": False, "step": "token", "message": e.message, "httpStatus": e.status,
+                "traceId": e.trace_id, "baseUrl": credentials.base_url}
+    try:
+        resp = client.get(USERS_PATH, {"_limit": 1, "_offset": 0}) or {}
+    except ApiError as e:
+        if e.status in (401, 403):
+            msg = ("The key was accepted, but it isn't allowed to read users. Use the environment's API key "
+                   "from Keys & domains in the Frontegg Portal.")
+        else:
+            msg = f"Got a token, but reading users failed: {e.message}"
+        return {"ok": False, "step": "read", "message": msg, "httpStatus": e.status, "traceId": e.trace_id,
+                "baseUrl": credentials.base_url}
+    users = (resp.get("_metadata") or {}).get("totalItems")
+    found = f" The environment has {users:,} users." if isinstance(users, int) else ""
+    return {"ok": True, "step": "done", "message": f"Connected to {credentials.base_url}.{found}",
+            "users": users, "traceId": client.last_trace_id, "baseUrl": credentials.base_url}

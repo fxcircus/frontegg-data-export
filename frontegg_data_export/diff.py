@@ -79,12 +79,17 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
     def both(key: str) -> bool:
         return bool(has_old.get(key) and has_new.get(key))
 
+    def one_only(key: str) -> bool:
+        """Exported in exactly one of the runs: worth saying it wasn't compared.
+        (If neither run exported it, there's nothing to say.)"""
+        return bool(has_old.get(key)) != bool(has_new.get(key))
+
     # ---- accounts -----------------------------------------------------------
     renamed = moved = 0
     if both("accounts"):
         oa, na = old["accounts"], new["accounts"]
         compare_parents = both("hierarchy")
-        if not compare_parents:
+        if one_only("hierarchy"):
             not_compared.append("Account moves: the hierarchy wasn't exported in both runs.")
         old_failed = set(old.get("failedHierarchyRoots") or [])
         new_failed = set(new.get("failedHierarchyRoots") or [])
@@ -112,7 +117,7 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
                 changes.append(Change("changed", "account", tid, n["name"], tid, n["name"], "parent",
                                       _acct_name(old, o.get("parentId")) or "(top level)",
                                       _acct_name(new, n.get("parentId")) or "(top level)"))
-    else:
+    elif one_only("accounts"):
         not_compared.append("Accounts weren't exported in both runs.")
 
     # ---- users and memberships ---------------------------------------------
@@ -120,7 +125,7 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
     roles_comparable = both("roles")
     if both("users"):
         ou, nu = old["users"], new["users"]
-        if not roles_comparable:
+        if one_only("roles"):
             not_compared.append("Roles weren't looked up in both runs.")
         # Logged in since the earlier run: last login moved forward, or (for a
         # new user) is at or after the earlier run's start.
@@ -170,7 +175,7 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
                     elif sorted(a["roleIds"]) != sorted(b["roleIds"]):
                         changes.append(Change("changed", "membership", uid, label, tid, name, "roles",
                                               _role_names(old, a["roleIds"]), _role_names(new, b["roleIds"])))
-    else:
+    elif one_only("users"):
         not_compared.append("Users weren't exported in both runs.")
 
     # ---- plan assignments ---------------------------------------------------
@@ -199,7 +204,7 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
                 changes.append(Change("changed", "plan_assignment", b["id"], b["planName"], b["accountId"],
                                       _acct_name(new, b["accountId"]), "expires_at",
                                       a["expiresAt"] or "never", b["expiresAt"] or "never"))
-    else:
+    elif one_only("plans"):
         not_compared.append("Plan assignments weren't exported in both runs.")
 
     if skipped_roles:
@@ -237,12 +242,30 @@ def diff_models(old: dict, new: dict) -> tuple[list[Change], dict]:
             "planAssignmentsRemoved": count("plan_assignment", "removed"),
             "planExpiryChanges": expiry_changed,
         },
-        "usersLoggedInSince": logged_in,
+        "usersLoggedInSince": logged_in if both("users") else None,
+        "compared": [k for k in ("accounts", "hierarchy", "users", "roles", "plans") if both(k)],
         "notCompared": not_compared,
     }
     return changes, summary
 
 
+def summary_lines(summary: dict) -> list[str]:
+    """Plain-language lines for the sections that were actually compared."""
+    c, compared = summary.get("counts") or {}, set(summary.get("compared") or [])
+    lines = []
+    if "users" in compared:
+        lines.append(f"Users: {c['usersAdded']} added, {c['usersRemoved']} removed, {c['usersChanged']} changed. "
+                     f"{summary['usersLoggedInSince']} logged in since.")
+    if "accounts" in compared:
+        moved = f", {c['accountsMoved']} moved" if "hierarchy" in compared else ""
+        lines.append(f"Accounts: {c['accountsAdded']} added, {c['accountsRemoved']} removed, "
+                     f"{c['accountsRenamed']} renamed{moved}.")
+    if "plans" in compared:
+        lines.append(f"Plan assignments: {c['planAssignmentsAdded']} added, {c['planAssignmentsRemoved']} removed, "
+                     f"{c['planExpiryChanges']} expiry changes.")
+    return lines
+
+
 def first_run_summary() -> dict:
     return {"from": None, "to": None, "total": 0, "counts": {}, "usersLoggedInSince": None,
-            "notCompared": [], "message": FIRST_RUN_MESSAGE}
+            "compared": [], "notCompared": [], "message": FIRST_RUN_MESSAGE}

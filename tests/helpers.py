@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -49,7 +51,8 @@ class ExportResult:
 
 
 def run_export(m: MockFrontegg, out_dir: str | Path, secret: str = CLIENT_SECRET, **kwargs) -> ExportResult:
-    env = {"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": secret, "FRONTEGG_BASE_URL": m.url}
+    env = {"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": secret, "FRONTEGG_BASE_URL": m.url,
+           "FDE_HOME": str(Path(out_dir) / ".fde-home")}
     out, errs = io.StringIO(), io.StringIO()
     with mock.patch.dict(os.environ, env), \
             mock.patch.object(runner, "DOTENV_PATH", Path(out_dir) / ".env-absent"), \
@@ -63,3 +66,19 @@ def run_export(m: MockFrontegg, out_dir: str | Path, secret: str = CLIENT_SECRET
 def temp_dir():
     with tempfile.TemporaryDirectory() as tmp:
         yield tmp
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def cli(args: list[str], m: MockFrontegg | None, home: str | Path, secret: str = CLIENT_SECRET,
+        extra_env: dict | None = None, timeout: float = 120) -> subprocess.CompletedProcess:
+    """Run the real CLI in a subprocess, pointed at the mock."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FRONTEGG_", "FDE_"))}
+    env["FDE_HOME"] = str(Path(home) / ".fde-home")
+    env["PYTHONIOENCODING"] = "utf-8"
+    if m is not None:
+        env.update({"FRONTEGG_CLIENT_ID": CLIENT_ID, "FRONTEGG_CLIENT_SECRET": secret, "FRONTEGG_BASE_URL": m.url})
+    env.update(extra_env or {})
+    return subprocess.run([sys.executable, "-m", "frontegg_data_export", *args], cwd=REPO, env=env,
+                          capture_output=True, text=True, encoding="utf-8", timeout=timeout)

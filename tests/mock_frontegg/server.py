@@ -33,7 +33,8 @@ class Faults:
     error_5xx_status: int = 503
     token_uses: int = 0                   # each token is valid for N GETs, then 401 (0 = unlimited)
     expires_in: int = 86400               # what /auth/vendor/ reports
-    failing_role_tenants: set[str] = field(default_factory=set)   # role lookups here always 500
+    failing_role_tenants: set[str] = field(default_factory=set)   # role lookups here always fail ...
+    failing_role_status: int = 500                                # ... with this status
     failing_tree_tenants: set[str] = field(default_factory=set)   # tree calls here get 400 (circular)
     failing_list_paths: set[str] = field(default_factory=set)     # these paths always 500
     audits_mode: str = "ok"               # ok | forbidden | not_found | error
@@ -250,7 +251,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not tenant:
             return 400, {"errors": ["frontegg-tenant-id header is required"]}
         if tenant in self.mock.faults.failing_role_tenants:
-            return 500, {"errors": ["Internal error"]}
+            return self.mock.faults.failing_role_status, {"errors": ["Role lookup failed"]}
         ids: list[str] = []
         for v in qs.get("ids", []):
             ids.extend(x for x in v.split(",") if x)

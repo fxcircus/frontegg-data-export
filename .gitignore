@@ -3,9 +3,14 @@
 .env.*
 !.env.example
 
-# Generated outputs (one JSON per run + an append-only log)
+# Runtime data: settings, logs, the fallback key file, and every export
+data/
+exports/
 frontegg_account_backup_*.json
 export.log
+
+# Build output
+dist/
 
 # Python / editor / OS noise
 __pycache__/
