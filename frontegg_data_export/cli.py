@@ -76,6 +76,9 @@ def _add_selection(p: argparse.ArgumentParser) -> None:
     p.add_argument("--roles", dest="roles", action="store_true", default=None,
                    help="look up each user's roles per account (the slowest step)")
     p.add_argument("--no-roles", dest="roles", action="store_false", help="skip role lookups")
+    p.add_argument("--login-events", dest="login_events", action="store_true", default=None,
+                   help="also export successful and failed logins from the audit log (one call per account)")
+    p.add_argument("--no-login-events", dest="login_events", action="store_false", help="skip login events")
     p.add_argument("--rate", type=_rate_arg, metavar="RATE",
                    help=f"requests per second: {', '.join(f'{k} ({v:g}/s)' for k, v in RATE_PRESETS.items())}, "
                         "or a number from 0.5 to 16")
@@ -94,6 +97,10 @@ def build_parser() -> Parser:
     _add_selection(run)
     run.add_argument("--format", dest="formats", type=_formats_arg, default=("csv", "json"), metavar="csv,json",
                      help="which outputs to write (default: csv,json)")
+    run.add_argument("--since", metavar="DATE",
+                     help="login events from this ISO 8601 date (default 'last': since the previous succeeded run)")
+    run.add_argument("--login-events-max-days", type=int, metavar="N",
+                     help="never read login events further back than N days (default: from Setup, else 30)")
     run.add_argument("--keep", type=int, metavar="N", help="keep the last N runs (default: from Setup, else 30)")
     run.add_argument("--quiet", action="store_true", help="print only the result line")
     run.add_argument("--progress", choices=("console", "jsonl", "quiet"),
@@ -132,7 +139,9 @@ def build_parser() -> Parser:
 def cmd_run(args: argparse.Namespace) -> int:
     trigger = args.trigger or ("scheduled" if args.scheduled else "manual")
     progress = args.progress or ("quiet" if (args.quiet or args.scheduled) else "console")
-    return runner.main(preset=args.preset, sections=args.sections, roles=args.roles, rate=args.rate,
+    return runner.main(preset=args.preset, sections=args.sections, roles=args.roles,
+                       login_events=args.login_events, since=args.since,
+                       login_events_max_days=args.login_events_max_days, rate=args.rate,
                        progress=progress, out_dir=args.out, keep=args.keep, trigger=trigger,
                        use_as_baseline=args.use_as_baseline, formats=args.formats)
 
@@ -140,7 +149,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_estimate(args: argparse.Namespace) -> int:
     settings = load_settings()
     selection = resolve(None if args.sections else (args.preset or settings["preset"]), args.sections,
-                        roles=settings["roles"] if args.roles is None else args.roles)
+                        roles=settings["roles"] if args.roles is None else args.roles,
+                        login_events=(settings["loginEvents"] if (args.login_events is None and not args.sections)
+                                      else args.login_events))
     rate = parse_rate(args.rate if args.rate is not None else settings["rate"])
     creds = load_credentials(settings=settings) if args.probe else None
     est = runner.estimate_for(selection, rate, Store(output_dir(args.out, settings)), probe=args.probe,

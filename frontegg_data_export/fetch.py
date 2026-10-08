@@ -8,9 +8,11 @@ adjust safely if your environment differs.
 
 from __future__ import annotations
 
-from typing import Iterable
+from datetime import datetime
+from typing import Callable, Iterable
 
 from .client import ApiError, FronteggClient
+from .model import iso_z
 from .progress import Reporter
 from .status import Failure
 
@@ -229,3 +231,66 @@ def walk_tree(node: dict) -> Iterable[dict]:
     yield node
     for child in node.get("children", []) or []:
         yield from walk_tree(child)
+
+
+class SectionUnavailable(Exception):
+    """This environment can't provide the section (plan or permissions)."""
+
+    def __init__(self, reason: str, error: ApiError) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.error = error
+
+
+def pull_login_events(client: FronteggClient, tenant_ids: list[str], start: datetime, end: datetime,
+                      failures: list[Failure], report: Reporter,
+                      classify: Callable[[dict], str | None]) -> tuple[list[dict], dict]:
+    """Login events from the audit log, one account at a time.
+
+    Quirks (see loginevents.py for what the docs do and don't say):
+    - the audits API is tenant-scoped: `frontegg-tenant-id` header per call;
+    - it pages with `count` (max 200) and an ITEM offset, unlike the
+      page-index `_offset` of /users/v3;
+    - only login rows are kept (matched on the action text), with the
+      classification in `_result`.
+    If the very first account is refused with 401/402/403/404, the section is
+    unavailable for this environment: raise instead of failing every account.
+    """
+    from .loginevents import AUDITS_PAGE_SIZE, AUDITS_PATH, UNAVAILABLE_REASONS
+
+    window = {"created_from": iso_z(start), "created_to": iso_z(end), "sortBy": "createdAt", "sortDirection": "asc"}
+    events: list[dict] = []
+    stats = {"accountsQueried": len(tenant_ids), "rowsScanned": 0, "success": 0, "failure": 0, "failedAccounts": 0}
+    answered = 0
+    for i, tid in enumerate(tenant_ids, 1):
+        offset = 0
+        try:
+            while True:
+                resp = client.get(AUDITS_PATH, {"count": AUDITS_PAGE_SIZE, "offset": offset, **window}, tenant_id=tid)
+                if isinstance(resp, dict):
+                    rows = resp.get("data") or resp.get("items") or []
+                    total = resp.get("total")
+                else:
+                    rows, total = (resp or []), None
+                for row in rows:
+                    kind = classify(row)
+                    if kind:
+                        events.append({**row, "tenantId": row.get("tenantId") or tid, "_result": kind})
+                        stats[kind] += 1
+                stats["rowsScanned"] += len(rows)
+                offset += len(rows)
+                if len(rows) < AUDITS_PAGE_SIZE or (total is not None and offset >= int(total)):
+                    break
+                if offset > SAFETY_OFFSET_CAP:
+                    raise ApiError(f"Stopped reading the audit log after {SAFETY_OFFSET_CAP} rows (safety cap).",
+                                   path=AUDITS_PATH)
+            answered += 1
+        except ApiError as e:
+            if answered == 0 and e.status in UNAVAILABLE_REASONS:
+                raise SectionUnavailable(UNAVAILABLE_REASONS[e.status], e) from None
+            failures.append(Failure.from_error("login_events", e, tenant_id=tid))
+            stats["failedAccounts"] += 1
+            report.warn(f"Couldn't read login events for account {tid}: {e.message}",
+                        step="login_events", tenantId=tid, traceId=e.trace_id)
+        report.progress("login_events", i, len(tenant_ids), "accounts", force=(i == len(tenant_ids)))
+    return events, stats

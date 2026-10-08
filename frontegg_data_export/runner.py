@@ -27,11 +27,15 @@ from .fetch import (
     pull_hierarchy,
     pull_pages_by_pageindex,
     pull_plans,
+    SectionUnavailable,
+    pull_login_events,
     pull_user_role_assignments,
+    users_by_tenant,
     walk_tree,
 )
+from .loginevents import DEFAULT_FAILURE_TERMS, DEFAULT_LOGIN_TERMS, DEFAULT_MAX_DAYS, classify, date_range
 from .logs import RunLog
-from .model import build_model
+from .model import build_model, iso_z, parse_ts
 from .progress import Reporter
 from .sections import STEP_LABELS, Counts, Estimate, Selection, estimate, resolve
 from .status import EXIT_CODES, EXIT_INTERRUPTED, FAILED, PARTIAL, SUCCEEDED, CoreSectionFailed, Failure, overall_status
@@ -43,7 +47,10 @@ class Run:
     def __init__(self, selection: Selection, base_url: str, client_id: str, secret: str, *,
                  rate: float, reporter: Reporter, store: Store, keep: int = DEFAULT_KEEP,
                  trigger: str = "manual", use_as_baseline: bool = False,
-                 formats: tuple[str, ...] = ("csv", "json"),
+                 formats: tuple[str, ...] = ("csv", "json"), since: datetime | None = None,
+                 login_events_max_days: int = DEFAULT_MAX_DAYS,
+                 login_terms: tuple[str, ...] = DEFAULT_LOGIN_TERMS,
+                 failure_terms: tuple[str, ...] = DEFAULT_FAILURE_TERMS,
                  client_factory: Callable[..., FronteggClient] = FronteggClient) -> None:
         self.selection = selection
         self.reporter = reporter
@@ -57,6 +64,10 @@ class Run:
         self.formats = tuple(formats)
         self.rows: dict[str, int] = {}
         self.notes: list[str] = []
+        self.since = since
+        self.login_events_max_days = login_events_max_days
+        self.login_terms = login_terms
+        self.failure_terms = failure_terms
         self.client = client_factory(base_url, client_id, secret, rate=rate)
         reporter.api_calls = lambda: self.client.calls
         self.base_url = self.client.base_url
@@ -203,6 +214,37 @@ class Run:
         self.reporter.step_done("entitlements", f"Plan assignments: {len(self.data['entitlements'])}")
         return len(self.data["entitlements"])
 
+    def _last_success_started(self) -> datetime | None:
+        ok = [r for r in self.store.load_history()["runs"] if r.get("status") == SUCCEEDED]
+        return parse_ts(ok[-1].get("startedAt")) if ok else None
+
+    def _step_login_events(self) -> int:
+        start, end, capped = date_range(self.started_at, self._last_success_started(), self.since,
+                                        self.login_events_max_days)
+        accounts = sorted(users_by_tenant(self.data["users"]))
+        window = f"{iso_z(start)} to {iso_z(end)}"
+        if capped:
+            self.reporter.info(f"Login events: limited to the last {self.login_events_max_days} days ({window}).")
+        else:
+            self.reporter.info(f"Login events: {window}, for {len(accounts)} account(s) with users.")
+        try:
+            events, stats = pull_login_events(
+                self.client, accounts, start, end, self.failures, self.reporter,
+                lambda row: classify(row, self.login_terms, self.failure_terms))
+        except SectionUnavailable as e:
+            self.section_notes["login_events"] = {"status": "unavailable", "reason": e.reason,
+                                                  "httpStatus": e.error.status, "traceId": e.error.trace_id}
+            self.reporter.warn(f"Login events are unavailable: {e.reason} The rest of the export continues.",
+                               step="login_events", traceId=e.error.trace_id)
+            return 0
+        self.data["loginEvents"] = events
+        self.section_notes["login_events"] = {
+            "status": "partial" if stats["failedAccounts"] else "ok",
+            "from": iso_z(start), "to": iso_z(end), "capped": capped, **stats}
+        self.reporter.step_done("login_events", f"Login events: {stats['success']} successful, "
+                                f"{stats['failure']} failed ({stats['rowsScanned']} audit rows read)")
+        return len(events)
+
     # ---- outputs ----------------------------------------------------------
     def _vendor_id(self) -> str | None:
         for key in ("roles", "tenants", "users"):
@@ -256,7 +298,8 @@ class Run:
         atomic_write_json(self.run_dir / "normalized.json", self.model, indent=None)
         self.files.append("normalized.json")
         if "csv" in self.formats:
-            self.rows = csvout.write_all(self.run_dir, self.model, self.selection.sections)
+            self.rows = csvout.write_all(self.run_dir, self.model, self.selection.sections,
+                                         login_events=self.data.get("loginEvents"))
             self.files.extend(self.rows)
             self.reporter.step_done("write", "Wrote " + ", ".join(f"{n} ({r} rows)" for n, r in self.rows.items()))
         if "json" in self.formats:
@@ -393,7 +436,20 @@ class Run:
         return EXIT_CODES[FAILED]
 
 
+def parse_since(value: str | None) -> datetime | None:
+    """`--since`: an ISO 8601 date or date-time (UTC if no zone), or "last"
+    (the default: since the previous succeeded run)."""
+    if value in (None, "", "last"):
+        return None
+    dt = parse_ts(value if "T" in value else f"{value}T00:00:00")
+    if dt is None:
+        raise ValueError(f"--since must be an ISO 8601 date like 2026-10-01 or 2026-10-01T08:00:00Z, or 'last' "
+                         f"(got {value!r})")
+    return dt
+
+
 def main(*, preset: str | None = None, sections: list[str] | None = None, roles: bool | None = None,
+         login_events: bool | None = None, since: str | None = None, login_events_max_days: int | None = None,
          rate: str | float | None = None, progress: str = "console", out_dir: str | Path | None = None,
          keep: int | None = None, trigger: str = "manual", use_as_baseline: bool = False,
          formats: tuple[str, ...] = ("csv", "json"), credentials: Credentials | None = None) -> int:
@@ -403,8 +459,12 @@ def main(*, preset: str | None = None, sections: list[str] | None = None, roles:
         settings = load_settings()
         creds = credentials or load_credentials(dotenv=DOTENV_PATH, settings=settings)
         selection = resolve(None if sections else (preset or settings["preset"]), sections,
-                            roles=settings["roles"] if roles is None else roles)
+                            roles=settings["roles"] if roles is None else roles,
+                            login_events=(settings["loginEvents"] if (login_events is None and not sections)
+                                          else login_events))
         rate_value = parse_rate(rate if rate is not None else settings["rate"])
+        since_dt = parse_since(since)
+        max_days = int(login_events_max_days or settings["loginEventsMaxDays"] or DEFAULT_MAX_DAYS)
     except (ConfigError, ValueError) as e:
         reporter.error(str(e))
         return EXIT_CODES[FAILED]
@@ -412,7 +472,10 @@ def main(*, preset: str | None = None, sections: list[str] | None = None, roles:
     run = Run(selection, creds.base_url, creds.client_id, creds.secret,
               rate=rate_value, reporter=reporter, store=store,
               keep=int(keep if keep is not None else settings["keepRuns"]), trigger=trigger,
-              use_as_baseline=use_as_baseline, formats=formats, client_factory=FronteggClient)
+              use_as_baseline=use_as_baseline, formats=formats, since=since_dt, login_events_max_days=max_days,
+              login_terms=tuple(settings.get("loginEventTerms") or DEFAULT_LOGIN_TERMS),
+              failure_terms=tuple(settings.get("loginFailureTerms") or DEFAULT_FAILURE_TERMS),
+              client_factory=FronteggClient)
     return run.execute()
 
 

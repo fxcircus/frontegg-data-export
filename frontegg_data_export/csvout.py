@@ -145,8 +145,11 @@ def users_without_plan_rows(model: dict) -> Iterable[list[Any]]:
                    u["createdAt"], u["lastLogin"]]
 
 
-def write_all(run_dir: Path, model: dict, sections: Iterable[str]) -> dict[str, int]:
+def write_all(run_dir: Path, model: dict, sections: Iterable[str],
+              login_events: list[dict] | None = None) -> dict[str, int]:
     """Write the CSVs that apply to the exported sections. Returns {file: rows}."""
+    from .loginevents import LOGIN_EVENTS_HEADER, event_rows
+
     sections = set(sections)
     written: dict[str, int] = {}
     if "users" in sections:
@@ -159,4 +162,7 @@ def write_all(run_dir: Path, model: dict, sections: Iterable[str]) -> dict[str, 
         if model["has"]["users"]:
             written["users_without_plan.csv"] = write_csv(run_dir / "users_without_plan.csv",
                                                           USERS_WITHOUT_PLAN_HEADER, users_without_plan_rows(model))
+    if "login_events" in sections and login_events is not None:
+        written["login_events.csv"] = write_csv(run_dir / "login_events.csv", LOGIN_EVENTS_HEADER,
+                                                event_rows(login_events, model))
     return written
