@@ -239,7 +239,17 @@ def _sigterm_to_interrupt(signum, frame):  # the local app stops a run with SIGT
     raise KeyboardInterrupt
 
 
+def _utf8_streams() -> None:
+    """Names and the progress glyphs are Unicode. On Windows, output that's
+    redirected to a file or pipe would otherwise use the ANSI code page and
+    crash on the first character it can't encode."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure") and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
     args = build_parser().parse_args(argv)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _sigterm_to_interrupt)

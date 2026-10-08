@@ -142,7 +142,7 @@ class SnapshotTests(unittest.TestCase):
                                                  "entitlements"})
             self.assertEqual(snap["counts"]["planAssignments"], len(ds.entitlements))
             self.assertTrue(all("tenantRoles" in u for u in snap["data"]["users"]))
-            model = json.loads((r.run_dir / "normalized.json").read_text())
+            model = json.loads((r.run_dir / "normalized.json").read_text(encoding="utf-8"))
             self.assertEqual(len(model["users"]), len(ds.users))
             self.assertEqual(model["failedRoleTenants"], [bad])
             self.assertIn("normalized.json", r.summary()["files"])

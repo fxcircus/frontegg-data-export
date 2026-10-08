@@ -37,7 +37,7 @@ class AtomicWriteTests(unittest.TestCase):
             target = Path(tmp) / "a.json"
             target.write_text("old")
             atomic_write_json(target, {"new": True})
-            self.assertEqual(json.loads(target.read_text()), {"new": True})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"new": True})
             self.assertEqual(os.listdir(tmp), ["a.json"])
 
     def test_leaves_target_untouched_on_failure(self):
@@ -48,7 +48,7 @@ class AtomicWriteTests(unittest.TestCase):
                 with atomic_open(target) as f:
                     f.write("half")
                     raise RuntimeError("boom")
-            self.assertEqual(target.read_text(), "old")
+            self.assertEqual(target.read_text(encoding="utf-8"), "old")
             self.assertEqual(os.listdir(tmp), ["a.csv"])
 
 
@@ -181,7 +181,7 @@ class EndToEndStoreTests(unittest.TestCase):
     def test_run_log_has_trace_ids(self):
         with MockFrontegg(make_dataset()) as m, temp_dir() as tmp:
             r = run_export(m, tmp, preset="users", roles=False)
-            text = (r.run_dir / "run.log").read_text()
+            text = (r.run_dir / "run.log").read_text(encoding="utf-8")
             self.assertIn("trace=", text)
             self.assertIn("GET /identity/resources/users/v3", text)
 
@@ -204,7 +204,7 @@ class LogTests(unittest.TestCase):
             log = RunLog(Path(tmp) / "run.log", r)
             log("token FAKE-SECRET-5678", "WARN")
             log.close()
-            text = (Path(tmp) / "run.log").read_text()
+            text = (Path(tmp) / "run.log").read_text(encoding="utf-8")
             self.assertIn("[WARN] token [redacted]", text)
 
     def test_app_log_rotates(self):
