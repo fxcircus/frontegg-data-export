@@ -21,9 +21,10 @@ LAST_NAMES = ["Example", "Sample", "Placeholder", "Testcase", "Demo", "Mock"]
 SPECIAL_NAMES = ["Zoë Exämple", "Renée Exemple", "=SUM(1+1)", "+Plus Example",
                  "-Minus Example", "@At Example"]
 
-LOGIN_OK_ACTION = "User logged in"
+LOGIN_OK_ACTION = "User logged in"                 # the action name a real audit log uses
+IMPERSONATED_LOGIN_ACTION = "Impersonated by support@example.com - User logged in"
 LOGIN_FAILED_ACTION = "User failed to log in"
-OTHER_ACTIONS = ["User updated profile", "Role assigned to user", "API token created"]
+OTHER_ACTIONS = ["Added user", "Assigned roles", "Created API key", "Reset password"]
 
 
 def iso(dt: datetime) -> str:
@@ -46,6 +47,11 @@ class Dataset:
     entitlements: list[dict]
     audits: list[dict]
     rng: random.Random = field(repr=False, default_factory=random.Random)
+    # Roles an account created for itself: /roles/v1 only returns them with that
+    # account's frontegg-tenant-id header.
+    account_roles: list[dict] = field(default_factory=list)
+    # An account users still belong to, but that the account list doesn't return.
+    ghost_tenant_id: str = ""
 
     # ---- helpers ---------------------------------------------------------
     def uid(self) -> str:
@@ -215,14 +221,41 @@ def make_dataset(seed: int = 7, tenants: int = 12, big_tenant_users: int = 230,
             for k in range(rng.randint(0, 3)):
                 when = now - timedelta(days=rng.randint(0, 20), seconds=rng.randint(0, 86399))
                 action = rng.choice([LOGIN_OK_ACTION, LOGIN_OK_ACTION, LOGIN_FAILED_ACTION] + OTHER_ACTIONS)
-                ds.audits.append({
+                ds.audits.append({     # field names as the real audits API returns them
                     "frontegg_id": ds.uid(), "tenantId": tid, "vendorId": ds.vendor_id,
-                    "userId": u["id"], "email": u["email"], "action": action,
+                    "environmentName": "Development",
+                    "actorId": u["id"], "email": u["email"], "action": action,
                     "severity": "Medium" if action == LOGIN_FAILED_ACTION else "Info",
                     "ip": f"203.0.113.{rng.randint(1, 254)}",
                     "userAgent": "Mozilla/5.0 (placeholder)", "description": action,
                     "createdAt": iso(when),
                 })
+
+    # ---- seen in a real environment (added last so earlier data is unchanged)
+    # An account-level role, defined by one account and assigned there.
+    acct = t[3] if len(t) > 3 else t[0]
+    custom = {"id": ds.uid(), "key": "Auditor", "name": "Auditor", "vendorId": ds.vendor_id, "tenantId": acct,
+              "level": 0, "isDefault": False, "permissions": []}
+    ds.account_roles.append(custom)
+    member = next((u for u in ds.users if acct in u["tenantIds"]), None)
+    if member:
+        ds.role_assignments[(member["id"], acct)] = sorted(ds.role_assignments[(member["id"], acct)] + [custom["id"]])
+    # A membership in an account that no longer exists: the account list doesn't
+    # return it, but users still list it and the role lookup still answers.
+    ghost = ds.uid()
+    ds.ghost_tenant_id = ghost
+    lingering = ds.users[10] if len(ds.users) > 10 else ds.users[0]
+    lingering["tenantIds"].append(ghost)
+    lingering["tenants"].append({"tenantId": ghost, "isDisabled": False, "temporaryExpirationDate": None})
+    ds.role_assignments[(lingering["id"], ghost)] = [ds.roles[1]["id"]]
+    # Impersonated logins, as the real audit log words them.
+    for u in ds.users[:2]:
+        if u["tenantIds"]:
+            ds.audits.append({"frontegg_id": ds.uid(), "tenantId": u["tenantIds"][0], "vendorId": ds.vendor_id,
+                              "environmentName": "Development", "actorId": u["id"], "email": u["email"],
+                              "action": IMPERSONATED_LOGIN_ACTION, "severity": "Info", "ip": "", "userAgent": "",
+                              "description": IMPERSONATED_LOGIN_ACTION,
+                              "createdAt": iso(now - timedelta(days=rng.randint(0, 20)))})
     ds.audits.sort(key=lambda a: a["createdAt"])
     return ds
 

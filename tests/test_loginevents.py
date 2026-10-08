@@ -10,7 +10,7 @@ from frontegg_data_export.loginevents import AUDITS_PATH, classify, date_range
 from frontegg_data_export.sections import Counts, estimate, resolve
 from tests.helpers import run_export, temp_dir
 from tests.mock_frontegg import Faults, MockFrontegg, make_dataset
-from tests.mock_frontegg.data import LOGIN_FAILED_ACTION, LOGIN_OK_ACTION
+from tests.mock_frontegg.data import IMPERSONATED_LOGIN_ACTION, LOGIN_FAILED_ACTION, LOGIN_OK_ACTION
 
 NOW = datetime(2026, 10, 8, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -38,6 +38,7 @@ class ClassifyTests(unittest.TestCase):
     def test_known_and_guessed_names(self):
         cases = {
             LOGIN_OK_ACTION: "success", LOGIN_FAILED_ACTION: "failure", "Login": "success",
+            IMPERSONATED_LOGIN_ACTION: "success",
             "login.completed": "success", "login.invalid_password": "failure",
             "frontegg.user.authenticated": "success", "frontegg.user.failedAuthentication": "failure",
             "User signed in with SSO": "success", "User login blocked": "failure",
@@ -71,6 +72,8 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual({row["result"] for row in rows}, {"success", "failure"})
             sample = rows[0]
             self.assertTrue(sample["user_email"].endswith("@example.com"))
+            self.assertTrue(all(row["user_id"] for row in rows), "user_id comes from the audit row's actorId")
+            self.assertIn(IMPERSONATED_LOGIN_ACTION, {row["action"] for row in rows})
             self.assertTrue(sample["account_name"].startswith("Acme"))
             self.assertTrue(sample["ip"].startswith("203.0.113."))
             stamps = [row["timestamp"] for row in rows]

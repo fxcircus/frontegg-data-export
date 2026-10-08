@@ -26,6 +26,7 @@ from .store import atomic_open
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 JOIN = "; "
 LOOKUP_FAILED = "(lookup failed)"
+ACCOUNT_NOT_FOUND = "(account not found)"
 
 USERS_HEADER = ["user_id", "email", "name", "account_id", "account_name", "roles", "plans", "verified",
                 "disabled_in_account", "created_at", "last_login"]
@@ -70,7 +71,13 @@ def _lower(s: str) -> str:
 
 
 def account_name(model: dict, account_id: str) -> str:
-    return (model["accounts"].get(account_id) or {}).get("name", "")
+    """The account's name. An account that users still list but Frontegg's
+    account list doesn't return (typically deleted) says so, rather than
+    leaving a blank that looks like a nameless account."""
+    acc = model["accounts"].get(account_id)
+    if acc is not None:
+        return acc["name"]
+    return ACCOUNT_NOT_FOUND if (account_id and model["has"]["accounts"]) else ""
 
 
 def role_cell(model: dict, membership: dict) -> str | list[str]:

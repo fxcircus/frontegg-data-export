@@ -101,6 +101,22 @@ class FetchTests(unittest.TestCase):
                             tenant_id=self.ds.tenants[-1]["tenantId"])
         self.assertEqual(cm.exception.status, 414)
 
+    def test_mock_role_catalog_hides_account_level_roles_without_the_header(self):
+        custom = self.ds.account_roles[0]
+        self.assertNotIn(custom["id"], {r["id"] for r in self.client.get(fetch.ROLES_PATH)})
+        with_header = self.client.get(fetch.ROLES_PATH, tenant_id=custom["tenantId"])
+        self.assertIn(custom["id"], {r["id"] for r in with_header})
+
+    def test_account_level_roles_are_looked_up_per_account(self):
+        users = list(self.ds.users)
+        assignments, _ = fetch.pull_user_role_assignments(self.client, users, [], self.report)
+        known = {r["id"] for r in self.client.get(fetch.ROLES_PATH)}
+        self.mock.requests.clear()
+        extra = fetch.pull_account_level_roles(self.client, assignments, known, self.report)
+        self.assertEqual([r["name"] for r in extra], ["Auditor"])
+        calls = self.mock.calls_to(fetch.ROLES_PATH)
+        self.assertEqual([c["tenant"] for c in calls], [self.ds.account_roles[0]["tenantId"]])
+
     def test_role_lookups_batched_per_tenant_in_chunks_of_100(self):
         users = list(self.ds.users)
         assignments, failed = fetch.pull_user_role_assignments(self.client, users, [], self.report)

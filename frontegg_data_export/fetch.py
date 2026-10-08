@@ -225,6 +225,35 @@ def pull_user_role_assignments(client: FronteggClient, users: list[dict], failur
     return all_assignments, failed_tenants
 
 
+def pull_account_level_roles(client: FronteggClient, assignments: list[dict], known_role_ids: set[str],
+                             report: Reporter) -> list[dict]:
+    """Quirk: `/identity/resources/roles/v1` without a tenant header returns only
+    the environment-wide roles. Roles an account created for itself (they carry
+    that account's `tenantId`) only come back when the same call has the
+    account's `frontegg-tenant-id` header. So, for each account whose role
+    assignments mention a role ID we don't know, ask again with its header.
+
+    A failure here only costs a role's name (the ID is kept), so it's a
+    warning, not a failure."""
+    unknown: dict[str, set[str]] = {}
+    for a in assignments:
+        missing = {r for r in a.get("roleIds") or [] if r not in known_role_ids}
+        if missing and a.get("tenantId"):
+            unknown.setdefault(a["tenantId"], set()).update(missing)
+    found: dict[str, dict] = {}
+    for tid in sorted(unknown):
+        try:
+            roles = client.get(ROLES_PATH, tenant_id=tid) or []
+        except ApiError as e:
+            report.warn(f"Couldn't read the roles defined in account {tid}, so some role names show as IDs: "
+                        f"{e.message}", step="roles", tenantId=tid, traceId=e.trace_id)
+            continue
+        for r in roles:
+            if r.get("id") and r["id"] not in known_role_ids:
+                found.setdefault(r["id"], r)
+    return list(found.values())
+
+
 def walk_tree(node: dict) -> Iterable[dict]:
     if not isinstance(node, dict):
         return

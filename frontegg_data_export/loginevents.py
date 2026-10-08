@@ -13,6 +13,11 @@ What Frontegg documents (developers.frontegg.com, audits API):
 - The action names used for successful and failed logins are NOT documented.
   So rows are classified by matching the action text (configurable), and the
   raw action is kept in the CSV so the classification can be checked.
+  Observed in a real environment's audit log: successful logins are
+  "User logged in" (and "Impersonated by <email> - User logged in"); rows
+  carry the user's ID as `actorId`. No failed-login rows were seen over 30
+  days, so the failure wording (or whether failures are audited at all) is
+  still unconfirmed.
 - Audit logs are listed as an Enterprise feature. When the API refuses
   (401/402/403/404) before any account has answered, the section is marked
   unavailable and the rest of the export carries on.
@@ -86,7 +91,8 @@ def event_rows(events: list[dict], model: dict) -> Iterable[list[Any]]:
     for e in events:
         user = e.get("user")
         email = _first(e, "email", "userEmail") or (user if isinstance(user, str) and "@" in user else None) or ""
-        uid = _first(e, "userId", "frontegg_user_id") or (by_email.get(email.casefold()) if email else None) or ""
+        uid = (_first(e, "userId", "actorId", "frontegg_user_id")
+               or (by_email.get(email.casefold()) if email else None) or "")
         if not email and uid:
             email = (model.get("users", {}).get(uid) or {}).get("email", "")
         tid = _first(e, "tenantId", "tenant_id") or ""

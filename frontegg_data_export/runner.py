@@ -28,6 +28,7 @@ from .fetch import (
     pull_pages_by_pageindex,
     pull_plans,
     SectionUnavailable,
+    pull_account_level_roles,
     pull_login_events,
     pull_user_role_assignments,
     users_by_tenant,
@@ -205,7 +206,11 @@ class Run:
         rows, self.failed_role_tenants = pull_user_role_assignments(
             self.client, self.data["users"], self.failures, self.reporter)
         self.data["userRoleAssignments"] = rows
-        self.reporter.step_done("roles", f"Role assignments: {len(rows)}")
+        known = {r["id"] for r in self.data.get("roles") or [] if r.get("id")}
+        extra = pull_account_level_roles(self.client, rows, known, self.reporter)
+        self.data.setdefault("roles", []).extend(extra)
+        more = f", plus {len(extra)} role(s) defined by individual accounts" if extra else ""
+        self.reporter.step_done("roles", f"Role assignments: {len(rows)}{more}")
         return len(rows)
 
     def _step_entitlements(self) -> int:
@@ -308,6 +313,15 @@ class Run:
             self._write_json("snapshot.json", snapshot)
             size = (self.run_dir / "snapshot.json").stat().st_size / 1_048_576
             self.reporter.step_done("write", f"Wrote snapshot.json ({size:.1f} MB)")
+        if self.model["has"]["accounts"]:
+            orphans = [(uid, tid) for uid, u in self.model["users"].items() for tid in u["memberships"]
+                       if tid not in self.model["accounts"]]
+            if orphans:
+                note = (f"{len(orphans)} membership(s) point at {len({t for _, t in orphans})} account(s) that "
+                        "Frontegg's account list doesn't return (probably deleted accounts). They're listed "
+                        f"with the account name {csvout.ACCOUNT_NOT_FOUND}.")
+                self.notes.append(note)
+                self.reporter.info(note)
         rule_plans = sorted(p["name"] for p in self.model["plans"].values() if p["usesRules"])
         if rule_plans and self.selection.has("plans"):
             note = (f"{len(rule_plans)} plan(s) can also grant access through targeting rules or a default "

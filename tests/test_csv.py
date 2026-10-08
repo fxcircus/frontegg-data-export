@@ -137,6 +137,10 @@ class EndToEndCsvTests(unittest.TestCase):
                                      "users_without_plan.csv"])
             users = read_csv(r.run_dir / "users.csv")
             self.assertEqual(len(users), sum(max(1, len(u["tenantIds"])) for u in ds.users))
+            self.assertTrue(any("Auditor" in u["roles"] for u in users), "account-level role resolved to its name")
+            ghost = [u for u in users if u["account_id"] == ds.ghost_tenant_id]
+            self.assertEqual([u["account_name"] for u in ghost], ["(account not found)"])
+            self.assertTrue(any("doesn't return" in n for n in r.summary()["notes"]))
             injected = [u["name"] for u in users if u["name"].startswith("'")]
             self.assertIn("'=SUM(1+1)", injected)
             self.assertIn("Zoë Exämple", {u["name"] for u in users})

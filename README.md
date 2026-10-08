@@ -22,7 +22,7 @@ python3 -m frontegg_data_export estimate --probe
 python3 -m frontegg_data_export run
 ```
 
-You can put the same three values in a `.env` file next to the app instead (see `.env.example`). Environment variables win over `.env`.
+You can put the same three values in a `.env` file next to the app instead (see `.env.example`), or point `FDE_DOTENV` at another file. Environment variables win over `.env`.
 
 ### Where to find the credentials
 
@@ -218,6 +218,7 @@ Rough call counts for a medium environment (5,000 users, 5,000 accounts, 5,000 p
 
 **How rows are classified**
 - Frontegg doesn't document the action names it uses for logins, so rows are classified by matching the action text: `login`, `logged in` or `authenticated` mark a login, and `fail`, `invalid`, `denied` or `locked` mark a failure.
+- In a real environment, successful logins appear as `User logged in`, and impersonated ones as `Impersonated by <email> - User logged in`. No failed-login rows appeared over 30 days, so the wording for failures, and whether failures are written to the audit log at all, is still unconfirmed.
 - The raw `action` is kept in the CSV so you can check the classification.
 - The terms can be changed with `loginEventTerms` and `loginFailureTerms` in `data/settings.json`.
 
@@ -246,6 +247,8 @@ Several Frontegg API behaviours don't match the public docs cleanly. Each is han
 14. **`/tenants/resources/hierarchy/v1/tree` returns 400 for a circular hierarchy.** That tree is recorded as a failure (the run is partial) instead of aborting the export.
 15. **The audit-log API (`/audits/resources/audits/v2`) is tenant-scoped and pages by item.** It uses `count` (max 200) plus an item `offset`, unlike the page-index `_offset` of `/users/v3`. The action names for logins aren't documented.
 16. **`expirationDate` can come without a timezone** (`2022-01-01T12:00:00`, as in the API reference). It is treated as UTC.
+17. **`/identity/resources/roles/v1` without a tenant header returns only environment-wide roles.** Roles that an account created for itself (they carry its `tenantId`) only come back when the call has that account's `frontegg-tenant-id` header. When a role assignment mentions a role ID the catalog doesn't know, the tool asks again for that account only, so the role name resolves.
+18. **Users can still list memberships in accounts that no longer exist.** `tenantIds` can include accounts that neither `/tenants/v2` (even filtered with `_tenantIds`) nor `/tenants/v1/{id}` return; the role lookup still answers for them. The CSVs show these as `(account not found)`, and the run summary counts them.
 
 ## Security
 
@@ -257,6 +260,7 @@ Several Frontegg API behaviours don't match the public docs cleanly. Each is han
 
 ```bash
 python3 -m unittest            # standard library only; runs against a local mock of the Frontegg API
+                               # (the tests ignore any real .env and FRONTEGG_* variables)
 python3 tools/mock_server.py   # run the mock by hand (prints a base URL, Client ID and API key)
 ```
 

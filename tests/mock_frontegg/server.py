@@ -241,7 +241,10 @@ class _Handler(BaseHTTPRequestHandler):
         return self._page_index(self.mock.ds.tenants, qs)
 
     def r_roles(self, qs):
-        return 200, self.mock.ds.roles
+        # Quirk: account-level roles only come back with that account's tenant header.
+        tenant = self.headers.get("frontegg-tenant-id")
+        extra = [r for r in self.mock.ds.account_roles if tenant and r["tenantId"] == tenant]
+        return 200, [*self.mock.ds.roles, *extra]
 
     def r_permissions(self, qs):
         return 200, self.mock.ds.permissions
