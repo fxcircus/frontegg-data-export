@@ -7,7 +7,7 @@ from __future__ import annotations
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Collection, Iterable
 
 from . import __version__, csvout
 from .client import ApiError, AuthError, FronteggClient
@@ -52,6 +52,7 @@ class Run:
                  login_events_max_days: int = DEFAULT_MAX_DAYS,
                  login_terms: tuple[str, ...] = DEFAULT_LOGIN_TERMS,
                  failure_terms: tuple[str, ...] = DEFAULT_FAILURE_TERMS,
+                 hierarchy_root_ids: Collection[str] | None = None,
                  client_factory: Callable[..., FronteggClient] = FronteggClient) -> None:
         self.selection = selection
         self.reporter = reporter
@@ -69,6 +70,7 @@ class Run:
         self.login_events_max_days = login_events_max_days
         self.login_terms = login_terms
         self.failure_terms = failure_terms
+        self.hierarchy_root_ids = hierarchy_root_ids
         self.client = client_factory(base_url, client_id, secret, rate=rate)
         reporter.api_calls = lambda: self.client.calls
         self.base_url = self.client.base_url
@@ -190,7 +192,8 @@ class Run:
         return len(self.data["tenants"])
 
     def _step_hierarchy(self) -> int:
-        trees, self.failed_roots = pull_hierarchy(self.client, self.data["tenants"], self.failures, self.reporter)
+        trees, self.failed_roots = pull_hierarchy(self.client, self.data["tenants"], self.failures, self.reporter,
+                                                  root_ids=self.hierarchy_root_ids)
         self.data["hierarchyTrees"] = trees
         in_tree = {n.get("tenantId") for t in trees for n in walk_tree(t) if n.get("tenantId")}
         self.reporter.step_done("hierarchy", f"Hierarchy trees: {len(trees)}, accounts in a hierarchy: {len(in_tree)}")
@@ -472,8 +475,10 @@ def main(*, preset: str | None = None, sections: list[str] | None = None, roles:
          login_events: bool | None = None, since: str | None = None, login_events_max_days: int | None = None,
          rate: str | float | None = None, progress: str = "console", out_dir: str | Path | None = None,
          keep: int | None = None, trigger: str = "manual", use_as_baseline: bool = False,
-         formats: tuple[str, ...] = ("csv", "json"), credentials: Credentials | None = None) -> int:
-    """Run one export. Options left as None come from settings.json."""
+         formats: tuple[str, ...] = ("csv", "json"), credentials: Credentials | None = None,
+         hierarchy_root_ids: Iterable[str] | None = None) -> int:
+    """Run one export. Options left as None come from settings.json.
+    `hierarchy_root_ids` limits the hierarchy step to those accounts (default: every reseller)."""
     reporter = Reporter(progress)
     try:
         settings = load_settings()
@@ -495,6 +500,7 @@ def main(*, preset: str | None = None, sections: list[str] | None = None, roles:
               use_as_baseline=use_as_baseline, formats=formats, since=since_dt, login_events_max_days=max_days,
               login_terms=tuple(settings.get("loginEventTerms") or DEFAULT_LOGIN_TERMS),
               failure_terms=tuple(settings.get("loginFailureTerms") or DEFAULT_FAILURE_TERMS),
+              hierarchy_root_ids=None if hierarchy_root_ids is None else set(hierarchy_root_ids),
               client_factory=FronteggClient)
     return run.execute()
 

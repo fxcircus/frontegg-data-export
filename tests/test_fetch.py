@@ -72,6 +72,15 @@ class FetchTests(unittest.TestCase):
         walked = {n["tenantId"] for tree in trees for n in fetch.walk_tree(tree)}
         self.assertEqual(len(walked), 7)   # 2 roots + 5 descendants
 
+    def test_hierarchy_root_ids_limit_the_calls(self):
+        tenants = list(self.ds.tenants)
+        root = next(t["tenantId"] for t in tenants if t["isReseller"])
+        trees, failed = fetch.pull_hierarchy(self.client, tenants, [], self.report, root_ids={root})
+        self.assertEqual(failed, [])
+        self.assertEqual([t["tenantId"] for t in trees], [root])
+        calls = self.mock.calls_to("/tenants/resources/hierarchy/v1/tree")
+        self.assertEqual([c["tenant"] for c in calls], [root])
+
     # ---- the mock itself reproduces the quirks --------------------------
     def test_mock_plain_limit_on_users_returns_stale_page(self):
         resp = self.client.get("/identity/resources/users/v3", {"limit": 200, "offset": 0})
