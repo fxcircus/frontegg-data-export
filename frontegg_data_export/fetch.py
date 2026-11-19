@@ -9,7 +9,7 @@ adjust safely if your environment differs.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable, Iterable
+from typing import Callable, Collection, Iterable
 
 from .client import ApiError, FronteggClient
 from .model import iso_z
@@ -137,7 +137,7 @@ def pull_entitlements(client: FronteggClient, report: Reporter) -> list[dict]:
 
 
 def pull_hierarchy(client: FronteggClient, tenants: list[dict], failures: list[Failure],
-                   report: Reporter) -> tuple[list[dict], list[str]]:
+                   report: Reporter, root_ids: Collection[str] | None = None) -> tuple[list[dict], list[str]]:
     """`/tenants/hierarchy/v1*` endpoints require a `frontegg-tenant-id` header
     even with a vendor token (without it: 403 "Tenant ID is not specified"),
     and answer relative to that tenant.
@@ -146,10 +146,14 @@ def pull_hierarchy(client: FronteggClient, tenants: list[dict], failures: list[F
     tenant is flat, and tenants carry no `parentTenantId`. So we call once
     per reseller — O(reseller count).
 
+    `root_ids` limits the calls to those resellers, for callers that already
+    know which accounts have sub-accounts (most resellers have none).
+
     A tree that can't be read (e.g. 400 for a circular hierarchy) is recorded
     as a failure and skipped; the rest of the export carries on.
     Returns (trees, root tenant IDs whose tree failed)."""
-    resellers = [t for t in tenants if t.get("isReseller")]
+    resellers = [t for t in tenants
+                 if t.get("isReseller") and (root_ids is None or t.get("tenantId") in root_ids)]
     trees: list[dict] = []
     failed_roots: list[str] = []
     for i, tid in enumerate((r["tenantId"] for r in resellers), 1):
